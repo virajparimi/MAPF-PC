@@ -13,7 +13,8 @@ public:
 	{
 		bool operator()(const CBSNode* n1, const CBSNode* n2) const 
 		{
-			return n1->g_val + n1->h_val >= n2->g_val + n2->h_val;
+			// Strict weak ordering for pairing_heap (min f at top).
+			return n1->g_val + n1->h_val > n2->g_val + n2->h_val;
 		}
 	};  // used by OPEN to compare nodes by f_val (top of the heap has min f_val)
 
@@ -22,9 +23,11 @@ public:
 	{
 		bool operator()(const CBSNode* n1, const CBSNode* n2) const 
 		{
-			if (n1->tie_breaking == n2->tie_breaking)
-				return rand() % 2;
-			return n1->tie_breaking >= n2->tie_breaking;
+			// Strict weak ordering for pairing_heap (min tie_breaking at top).
+			// Break ties deterministically by generation time.
+			if (n1->tie_breaking != n2->tie_breaking)
+				return n1->tie_breaking > n2->tie_breaking;
+			return n1->time_generated > n2->time_generated;
 		}
 	};  // used by FOCAL to compare nodes by tie_breaking value (top of the heap has min tie_breaking value)
 

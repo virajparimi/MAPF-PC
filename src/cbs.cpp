@@ -4,6 +4,8 @@
 */
 #include <boost/program_options.hpp>
 #include <boost/tokenizer.hpp>
+#include <algorithm>
+#include <cctype>
 #include "CBS.h"
 
 /* Declare some static utility functions */
@@ -47,10 +49,13 @@ int main(int argc, char** argv)
 		// ("rectangleReasoning", po::value<bool>()->default_value(false), "Using rectangle reasoning")
 		// ("corridorReasoning", po::value<bool>()->default_value(false), "Using corridor reasoning")
 		// ("mutexReasoning", po::value<string>()->default_value("None"), "Using mutex reasoning (C, None)")
-		("targetReasoning", po::value<bool>()->default_value(false), "Using target reasoning")
-		("restart", po::value<int>()->default_value(1), "number of restart times (at least 1)")
-		// ("sipp", po::value<bool>()->default_value(false), "using sipp as the single agent solver")
-		;
+			("targetReasoning", po::value<bool>()->default_value(false), "Using target reasoning")
+			("restart", po::value<int>()->default_value(1), "number of restart times (at least 1)")
+			("lowLevelPlanner", po::value<string>()->default_value("mlastar"),
+			 "low-level planner: mlastar or sipps")
+      ("sippsSuboptimality", po::value<double>()->default_value(1.0),
+       "SIPPS low-level suboptimality bound (>=1.0)")
+			;
 
 	po::variables_map vm;
 	po::store(po::parse_command_line(argc, argv, desc), vm);
@@ -63,6 +68,19 @@ int main(int argc, char** argv)
 	}
 
 	po::notify(vm);
+  string lowLevelPlanner = vm["lowLevelPlanner"].as<string>();
+  for (char& ch : lowLevelPlanner) {
+    ch = (char)std::tolower((unsigned char)ch);
+  }
+	  const bool useSippLowLevel =
+	      (lowLevelPlanner == "sipp" || lowLevelPlanner == "sipps");
+  const double sippsSuboptimality =
+      std::max(1.0, vm["sippsSuboptimality"].as<double>());
+  if (!useSippLowLevel && lowLevelPlanner != "mlastar") {
+    cerr << "Unknown lowLevelPlanner '" << vm["lowLevelPlanner"].as<string>()
+         << "'. Expected mlastar or sipps." << endl;
+    return -1;
+  }
 	/////////////////////////////////////////////////////////////////////////
 	// check the correctness and consistence of params
 	/*if (vm["sipp"].as<bool>() && vm["targetReasoning"].as<bool>())
@@ -147,11 +165,12 @@ int main(int argc, char** argv)
 	
 	//////////////////////////////////////////////////////////////////////
 	// initialize the solver
-	CBS cbs(instance, false, h, vm["screen"].as<int>());
-	cbs.setDisjointSplitting(vm["disjointSplitting"].as<bool>());
-	cbs.setBypass(vm["bypass"].as<bool>());
-	cbs.setTargetReasoning(vm["targetReasoning"].as<bool>());
-	cbs.setConflictSelectionRule(conflict);
+		CBS cbs(instance, useSippLowLevel, h, vm["screen"].as<int>());
+		cbs.setDisjointSplitting(vm["disjointSplitting"].as<bool>());
+		cbs.setBypass(vm["bypass"].as<bool>());
+		cbs.setTargetReasoning(vm["targetReasoning"].as<bool>());
+    cbs.setLowLevelSuboptimality(sippsSuboptimality);
+		cbs.setConflictSelectionRule(conflict);
 	cbs.setNodeSelectionRule(n);
 
   // Functions below are not supported right now

@@ -604,17 +604,14 @@ bool PBS_naive::findOneConflict(int a1, int a2){
 
 
 
-PBS_naive::PBS_naive(const Instance& instance, int screen):
-CBS(instance, false, heuristics_type::ZERO, screen)
+PBS_naive::PBS_naive(const Instance& instance, bool sipp, int screen):
+CBS(instance, sipp, heuristics_type::ZERO, screen)
 {
   this->screen = screen;
   this->focal_w = 1;
   this->num_of_agents = instance.getDefaultNumberOfAgents();
   // mdd_helper(initial_constraints, search_engines),
 	clock_t t = clock();
-
-	search_engines.resize(num_of_agents);
-
 
 	runtime_preprocessing = (double) (clock() - t) / CLOCKS_PER_SEC;
 
@@ -623,4 +620,3 @@ CBS(instance, false, heuristics_type::ZERO, screen)
 		instance.printAgents();
 	}
 }
-

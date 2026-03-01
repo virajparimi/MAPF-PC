@@ -13,11 +13,16 @@ public:
   // Runs the algorithm until the problem is solved or time is exhausted
   bool solve(double time_limit, int cost_lowerbound = 0, int cost_upperbound = MAX_COST);
 
-  PBS(const Instance& instance, int screen);
+  PBS(const Instance& instance, bool sipp, int screen);
   // PBS(vector<SingleAgentSolver*>& search_engines,
   //   const vector<ConstraintTable>& constraints,
   //     vector<Path>& paths_found_initially, heuristics_type heuristic, int screen);
   ~PBS();
+
+  void setInitialTaskPaths(const vector<Path>& initial_task_paths) {
+    paths_found_initially = initial_task_paths;
+  }
+  void setMutableTasksMask(const vector<bool>& mutable_tasks_mask);
 
   // used to store initial priorities
   vector<ConstraintTable> initial_constraints;
@@ -54,6 +59,17 @@ private:
   void build_ct(ConstraintTable& ct, int task_id, vector<vector<int>> adj_list_r);
 
   int num_of_tasks;
+  vector<bool> mutable_tasks_mask_;
+  bool strict_task_mutability_ = false;
+
+  inline bool canReplanTask(int task_id) const {
+    if (!strict_task_mutability_) {
+      return true;
+    }
+    return task_id >= 0 && task_id < num_of_tasks &&
+           task_id < (int)mutable_tasks_mask_.size() &&
+           mutable_tasks_mask_[task_id];
+  }
 
   inline bool is_task_a_final_one(int task);
   inline void updatePaths(CBSNode* curr);
@@ -80,7 +96,7 @@ public:
   // Runs the algorithm until the problem is solved or time is exhausted
   bool solve(double time_limit, int cost_lowerbound = 0, int cost_upperbound = MAX_COST);
 
-  PBS_naive(const Instance& instance, int screen);
+  PBS_naive(const Instance& instance, bool sipp, int screen);
   // PBS(vector<SingleAgentSolver*>& search_engines,
   //   const vector<ConstraintTable>& constraints,
   //     vector<Path>& paths_found_initially, heuristics_type heuristic, int screen);

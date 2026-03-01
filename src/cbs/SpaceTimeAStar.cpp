@@ -309,9 +309,11 @@ Path MultiLabelSpaceTimeAStar::findPathSegment(ConstraintTable& constraint_table
 			int next_h_val = max(get_heuristic(stage, next_location), holding_time - next_timestep);
 			// if (next_g_val + next_h_val > constraint_table.length_max || next_g_val + next_h_val > f_ub[stage])
 			// 	continue;
-      // TODO use CAT
-			int next_internal_conflicts = curr->num_of_conflicts;
-      // constraint_table.getNumOfConflictsForStep(curr->location, next_location, next_timestep);
+			int next_internal_conflicts =
+          curr->num_of_conflicts +
+          constraint_table.getNumOfConflictsForStep(curr->location,
+                                                    next_location,
+                                                    next_timestep);
 
 			// generate (maybe temporary) node
 			auto next = new MultiLabelAStarNode(next_location, next_g_val, next_h_val,
@@ -594,4 +596,3 @@ void MultiLabelSpaceTimeAStar::releaseNodes()
 		delete node;
 	allNodes_table.clear();
 }
-

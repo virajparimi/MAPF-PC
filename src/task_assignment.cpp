@@ -3,12 +3,337 @@
 */
 #include <boost/program_options.hpp>
 #include <boost/tokenizer.hpp>
+#include <algorithm>
+#include <cctype>
+#include <sstream>
+#include <unordered_set>
 #include "PBS.h"
 #include "TaskAssignment.h"
 #include "stp/TemporalGraph.hpp"
 
 /* Declare some static utility functions */
 static void usage();
+
+static std::vector<int> parseIntList(const std::string& line) {
+  std::string normalized = line;
+  for (char& ch : normalized) {
+    if ((ch >= '0' && ch <= '9') || ch == '-') {
+      continue;
+    }
+    ch = ' ';
+  }
+  std::istringstream iss(normalized);
+  std::vector<int> values;
+  int value = 0;
+  while (iss >> value) {
+    values.push_back(value);
+  }
+  return values;
+}
+
+static bool loadMutableAgentsMaskFromFile(const std::string& file_path,
+                                          int num_agents,
+                                          std::vector<bool>& mutable_mask) {
+  mutable_mask.assign(num_agents, true);
+  if (file_path.empty()) {
+    return true;
+  }
+
+  std::ifstream in(file_path);
+  if (!in.is_open()) {
+    std::cerr << "Failed to open mutable agent file: " << file_path << std::endl;
+    return false;
+  }
+
+  std::string line;
+  std::vector<int> mutable_agents;
+  while (std::getline(in, line)) {
+    const auto values = parseIntList(line);
+    mutable_agents.insert(mutable_agents.end(), values.begin(), values.end());
+  }
+
+  if (mutable_agents.empty()) {
+    std::cerr << "Mutable agent file is empty: " << file_path << std::endl;
+    return false;
+  }
+
+  mutable_mask.assign(num_agents, false);
+  for (int agent : mutable_agents) {
+    if (agent < 0 || agent >= num_agents) {
+      std::cerr << "Mutable agent id out of range in " << file_path
+                << ": " << agent << std::endl;
+      return false;
+    }
+    mutable_mask[agent] = true;
+  }
+  return true;
+}
+
+static bool loadMutableGlobalTasksFromFile(
+    const std::string& file_path,
+    std::unordered_set<int>& mutable_global_tasks) {
+  mutable_global_tasks.clear();
+  if (file_path.empty()) {
+    return true;
+  }
+
+  std::ifstream in(file_path);
+  if (!in.is_open()) {
+    std::cerr << "Failed to open mutable task file: " << file_path << std::endl;
+    return false;
+  }
+
+  std::string line;
+  while (std::getline(in, line)) {
+    const auto values = parseIntList(line);
+    for (int value : values) {
+      mutable_global_tasks.insert(value);
+    }
+  }
+
+  if (mutable_global_tasks.empty()) {
+    std::cerr << "Mutable task file is empty: " << file_path << std::endl;
+    return false;
+  }
+  return true;
+}
+
+static bool loadInitialJoinedPathsFromFile(const std::string& file_path,
+                                           int num_agents,
+                                           std::vector<Path>& joined_paths) {
+  joined_paths.clear();
+  if (file_path.empty()) {
+    return true;
+  }
+
+  std::ifstream in(file_path);
+  if (!in.is_open()) {
+    std::cerr << "Failed to open initial paths file: " << file_path
+              << std::endl;
+    return false;
+  }
+
+  auto trim = [](const std::string& s) {
+    const auto first = s.find_first_not_of(" \t\r\n");
+    if (first == std::string::npos) {
+      return std::string();
+    }
+    const auto last = s.find_last_not_of(" \t\r\n");
+    return s.substr(first, last - first + 1);
+  };
+
+  auto next_data_line = [&](std::string& out) -> bool {
+    while (std::getline(in, out)) {
+      out = trim(out);
+      if (out.empty() || out[0] == '#') {
+        continue;
+      }
+      return true;
+    }
+    return false;
+  };
+
+  std::string line;
+  bool has_pending_header = false;
+  std::string pending_header;
+  if (!next_data_line(line)) {
+    std::cerr << "Initial paths file is empty: " << file_path << std::endl;
+    return false;
+  }
+  if (line.rfind("AGENT_PATHS", 0) == 0) {
+    // consume header and continue
+  } else if (line.rfind("Agent", 0) == 0) {
+    has_pending_header = true;
+    pending_header = line;
+  } else {
+    std::cerr << "Unexpected header in initial paths file: '" << line << "'"
+              << std::endl;
+    return false;
+  }
+
+  joined_paths.assign(num_agents, Path());
+  for (int agent = 0; agent < num_agents; agent++) {
+    std::string agent_header;
+    if (has_pending_header) {
+      agent_header = pending_header;
+      has_pending_header = false;
+    } else if (!next_data_line(agent_header)) {
+      std::cerr << "Missing Agent header for agent " << agent << " in "
+                << file_path << std::endl;
+      return false;
+    }
+
+    auto header_vals = parseIntList(agent_header);
+    if (header_vals.empty() || header_vals.front() != agent) {
+      std::cerr << "Agent order mismatch in initial paths file: expected Agent "
+                << agent << ", got '" << agent_header << "'" << std::endl;
+      return false;
+    }
+
+    std::string locations_line;
+    if (!next_data_line(locations_line)) {
+      std::cerr << "Missing locations line for agent " << agent << std::endl;
+      return false;
+    }
+    if (locations_line.rfind("Agent", 0) == 0) {
+      std::cerr << "Missing locations for agent " << agent << std::endl;
+      return false;
+    }
+    auto locations = parseIntList(locations_line);
+    if (locations.empty()) {
+      std::cerr << "No locations parsed for agent " << agent << std::endl;
+      return false;
+    }
+
+    std::string timestamps_line;
+    if (!next_data_line(timestamps_line)) {
+      std::cerr << "Missing timestamps line for agent " << agent << std::endl;
+      return false;
+    }
+    if (timestamps_line.rfind("Agent", 0) == 0) {
+      has_pending_header = true;
+      pending_header = timestamps_line;
+      timestamps_line.clear();
+    }
+    auto timestamps = parseIntList(timestamps_line);
+
+    Path path;
+    path.begin_time = 0;
+    path.path.resize(locations.size());
+    for (int i = 0; i < (int)locations.size(); i++) {
+      path.path[i].location = locations[i];
+      path.path[i].is_goal = false;
+    }
+    path.timestamps = timestamps;
+    for (int ts : path.timestamps) {
+      if (ts < 0 || ts >= (int)path.path.size()) {
+        std::cerr << "Timestamp out of range for agent " << agent << ": " << ts
+                  << std::endl;
+        return false;
+      }
+      path.path[ts].is_goal = true;
+    }
+    joined_paths[agent] = std::move(path);
+  }
+  return true;
+}
+
+static bool splitJoinedPathsForPBS(const std::vector<Path>& joined_paths,
+                                   const std::vector<int>& goals_per_agent,
+                                   const std::vector<bool>& mutable_mask,
+                                   bool strict_task_mutability,
+                                   const std::vector<bool>* mutable_task_mask_flat,
+                                   std::vector<Path>& task_paths,
+                                   std::string& error_message) {
+  error_message.clear();
+  task_paths.clear();
+  if ((int)joined_paths.size() != (int)goals_per_agent.size() ||
+      (int)joined_paths.size() != (int)mutable_mask.size()) {
+    error_message = "joined path count does not match goals_per_agent size";
+    return false;
+  }
+
+  int flat_task_id = 0;
+  for (int agent = 0; agent < (int)joined_paths.size(); agent++) {
+    const int goal_count = goals_per_agent[agent];
+    if (goal_count <= 0) {
+      error_message = "goal count must be positive for all agents";
+      return false;
+    }
+
+    // Mutable agents are replanned in PBS root under current CT.
+    // Seed with empty per-task segments to force root replanning.
+    if (!strict_task_mutability && mutable_mask[agent]) {
+      for (int stage = 0; stage < goal_count; stage++) {
+        task_paths.emplace_back(Path());
+      }
+      flat_task_id += goal_count;
+      continue;
+    }
+
+    const auto& joined = joined_paths[agent];
+    if (joined.empty()) {
+      error_message = "joined path is empty for agent " + std::to_string(agent);
+      return false;
+    }
+    const int old_goal_count = (int)joined.timestamps.size();
+    if (!strict_task_mutability && old_goal_count != goal_count) {
+      error_message = "timestamp count mismatch for agent " +
+                      std::to_string(agent) + " (got " +
+                      std::to_string(old_goal_count) + ", expected " +
+                      std::to_string(goal_count) + ")";
+      return false;
+    }
+    if (strict_task_mutability && old_goal_count < goal_count) {
+      // Missing segments are only acceptable for mutable tasks introduced in
+      // this mini instance. Non-mutable slots must keep a seed segment.
+      for (int stage = old_goal_count; stage < goal_count; stage++) {
+        const int task_id = flat_task_id + stage;
+        const bool stage_mutable =
+            (mutable_task_mask_flat != nullptr &&
+             task_id >= 0 &&
+             task_id < (int)mutable_task_mask_flat->size() &&
+             (*mutable_task_mask_flat)[task_id]);
+        if (!stage_mutable) {
+          error_message = "strict mutability split mismatch for agent " +
+                          std::to_string(agent) + ": missing non-mutable stage " +
+                          std::to_string(stage);
+          return false;
+        }
+      }
+    }
+
+    int previous = -1;
+    for (int stage = 0; stage < goal_count; stage++) {
+      if (stage >= old_goal_count) {
+        task_paths.emplace_back(Path());
+        continue;
+      }
+      const int end_t = joined.timestamps[stage];
+      if (end_t < 0 || end_t >= (int)joined.size()) {
+        error_message = "timestamp out of range for agent " +
+                        std::to_string(agent);
+        return false;
+      }
+      if (end_t < previous) {
+        error_message =
+            "timestamps must be nondecreasing for agent " + std::to_string(agent);
+        return false;
+      }
+      const int begin_t = (stage == 0 ? 0 : joined.timestamps[stage - 1]);
+      if (begin_t > end_t) {
+        error_message =
+            "invalid segment bounds for agent " + std::to_string(agent);
+        return false;
+      }
+      Path seg;
+      seg.begin_time = begin_t;
+      for (int t = begin_t; t <= end_t; t++) {
+        seg.path.push_back(joined.path[t]);
+      }
+      task_paths.push_back(std::move(seg));
+      previous = end_t;
+    }
+    flat_task_id += goal_count;
+  }
+  return true;
+}
+
+static bool normalizeLowLevelPlanner(std::string planner_name,
+                                     std::string& normalized_planner) {
+  for (char& ch : planner_name) {
+    ch = (char)std::tolower((unsigned char)ch);
+  }
+  if (planner_name == "mlastar") {
+    normalized_planner = "mlastar";
+    return true;
+  }
+  if (planner_name == "sipp" || planner_name == "sipps") {
+    normalized_planner = "sipps";
+    return true;
+  }
+  return false;
+}
 
 /* Main function */
 int main(int argc, char** argv) {
@@ -24,11 +349,24 @@ int main(int argc, char** argv) {
           "cutoffTime,t", po::value<double>()->default_value(7200),
           "cutoff time (seconds)")(
           "agentNum,k", po::value<int>()->default_value(0), "number of agents")(
+          "fixedAssignmentFile", po::value<string>()->default_value(""),
+          "optional fixed assignment file produced by MAPF-PC-LNS")(
+          "mutableAgentsFile", po::value<string>()->default_value(""),
+          "optional mutable-agent list file (agents not listed are fixed)")(
+          "mutableTasksFile", po::value<string>()->default_value(""),
+          "optional mutable global task-id list; when provided with PBS, "
+          "only those tasks are replannable")(
+          "initialPathsFile", po::value<string>()->default_value(""),
+          "optional initial joined paths file used to seed root paths")(
           "seed,d", po::value<int>()->default_value(0), "random seed")(
-          "screen,s", po::value<int>()->default_value(1),
+      "screen,s", po::value<int>()->default_value(1),
           "screen option (0: none; 1: results; 2:all)")(
           "solver", po::value<string>()->default_value("CBS"),
-          "solver, CBS, PBS or PBSN")
+          "solver, CBS, PBS or PBSN")(
+          "lowLevelPlanner", po::value<string>()->default_value("mlastar"),
+          "low-level planner: mlastar or sipps")(
+          "sippsSuboptimality", po::value<double>()->default_value(1.0),
+          "SIPPS low-level suboptimality bound (>=1.0)")
       // params for instance generators
       ("rows", po::value<int>()->default_value(0), "number of rows")(
           "pc", po::value<bool>()->default_value(false),
@@ -58,45 +396,155 @@ int main(int argc, char** argv) {
   }
 
   po::notify(vm);
-  srand((int)time(0));
+  std::string lowLevelPlanner;
+  if (!normalizeLowLevelPlanner(vm["lowLevelPlanner"].as<string>(),
+                                lowLevelPlanner)) {
+    std::cerr << "Unknown lowLevelPlanner: '"
+              << vm["lowLevelPlanner"].as<string>()
+              << "'. Expected 'mlastar' or 'sipps'.\n";
+    return -1;
+  }
+  const bool useSippLowLevel = (lowLevelPlanner == "sipps");
+  const double sippsSuboptimality =
+      std::max(1.0, vm["sippsSuboptimality"].as<double>());
+  int seed = vm["seed"].as<int>();
+  if (seed == 0) {
+    seed = (int)time(0);
+  }
+  srand(seed);
 
   ///////////////////////////////////////////////////////////////////////////
   // load the instance
   TaskAssignment instance(vm["map"].as<string>(), vm["agents"].as<string>(),
                           vm["agentNum"].as<int>());
 
-  instance.find_greedy_plan();
+  const string fixedAssignmentFile = vm["fixedAssignmentFile"].as<string>();
+  const string mutableAgentsFile = vm["mutableAgentsFile"].as<string>();
+  const string mutableTasksFile = vm["mutableTasksFile"].as<string>();
+  const string initialPathsFile = vm["initialPathsFile"].as<string>();
+  if (!fixedAssignmentFile.empty()) {
+    if (!instance.loadFixedAssignmentFromFile(fixedAssignmentFile)) {
+      cerr << "Failed to load fixed assignment file: " << fixedAssignmentFile
+           << endl;
+      return -1;
+    }
+  } else {
+    instance.find_greedy_plan();
+  }
 
+  const int num_agents = vm["agentNum"].as<int>();
   vector<vector<int>> task_plan = instance.getTaskPlans();
+  std::vector<bool> mutable_agents_mask;
+  if (!loadMutableAgentsMaskFromFile(mutableAgentsFile, num_agents,
+                                     mutable_agents_mask)) {
+    return -1;
+  }
+  std::unordered_set<int> mutable_global_tasks;
+  if (!loadMutableGlobalTasksFromFile(mutableTasksFile, mutable_global_tasks)) {
+    return -1;
+  }
+  std::vector<bool> mutable_task_mask;
+  if (!mutable_global_tasks.empty()) {
+    int total_tasks = 0;
+    for (int agent = 0; agent < num_agents; agent++) {
+      total_tasks += (int)task_plan[agent].size();
+    }
+    mutable_task_mask.assign(total_tasks, false);
+    std::unordered_set<int> found_mutable_tasks;
+    int task_id = 0;
+    for (int agent = 0; agent < num_agents; agent++) {
+      for (int local = 0; local < (int)task_plan[agent].size(); local++) {
+        const int global_task = task_plan[agent][local];
+        if (mutable_global_tasks.find(global_task) != mutable_global_tasks.end()) {
+          mutable_task_mask[task_id] = true;
+          found_mutable_tasks.insert(global_task);
+        }
+        task_id++;
+      }
+    }
+    for (int global_task : mutable_global_tasks) {
+      if (found_mutable_tasks.find(global_task) == found_mutable_tasks.end()) {
+        std::cerr << "Mutable global task " << global_task
+                  << " was not found in fixed assignment" << std::endl;
+        return -1;
+      }
+    }
+  }
+  std::vector<std::vector<bool>> mutable_temporal_landmarks_mask;
+  if (!mutable_global_tasks.empty()) {
+    mutable_temporal_landmarks_mask.resize(num_agents);
+    for (int agent = 0; agent < num_agents; agent++) {
+      const int landmarks = std::max(1, (int)task_plan[agent].size());
+      mutable_temporal_landmarks_mask[agent].assign(landmarks, false);
+
+      // CBS mini-repair replans at agent scope (all landmarks for mutable
+      // agents), so temporal checking must include the full mutable-agent
+      // landmark space, not only destroyed-task landmarks.
+      const bool mutable_agent =
+          agent >= 0 && agent < (int)mutable_agents_mask.size() &&
+          mutable_agents_mask[agent];
+      if (mutable_agent) {
+        for (int local = 0; local < (int)task_plan[agent].size(); local++) {
+          mutable_temporal_landmarks_mask[agent][local] = true;
+        }
+      } else {
+        // Frozen agents stay temporal-frozen except where legacy mutable-task
+        // scope explicitly marks a landmark.
+        for (int local = 0; local < (int)task_plan[agent].size(); local++) {
+          const int global_task = task_plan[agent][local];
+          if (mutable_global_tasks.find(global_task) !=
+              mutable_global_tasks.end()) {
+            mutable_temporal_landmarks_mask[agent][local] = true;
+          }
+        }
+      }
+    }
+  }
+  std::vector<Path> initial_joined_paths;
+  if (!loadInitialJoinedPathsFromFile(initialPathsFile, num_agents,
+                                      initial_joined_paths)) {
+    return -1;
+  }
   cout << "TASK ASSIGNMENTS" << endl;
-  for (int i = 0; i < vm["agentNum"].as<int>(); i++) {
+  for (int i = 0; i < num_agents; i++) {
     cout << "Agent " << i << endl;
     for (int j = 0; j < task_plan[i].size(); j++) {
       cout << task_plan[i][j] << ", ";
     }
     cout << endl;
   }
-  cout << "Agent " << vm["agentNum"].as<int>() << endl;
+  cout << "Agent " << num_agents << endl;
 
   if (vm["solver"].as<string>() == "CBS") {
     cout << "Invoking CBS" << endl;
     auto h = heuristics_type::ZERO;
-    CBS cbs(instance, false, h, vm["screen"].as<int>());
+    CBS cbs(instance, useSippLowLevel, h, vm["screen"].as<int>());
 
     cbs.setPrioritizeConflicts(vm["pc"].as<bool>());
     cbs.setSTP(vm["stp"].as<bool>());
     cbs.setUsingTimestamps(vm["timestamps"].as<bool>());
     cbs.setTargetReasoning(vm["target"].as<bool>());
     cbs.setDisjointSplitting(vm["disjoint"].as<bool>());
-
+    cbs.setLowLevelSuboptimality(sippsSuboptimality);
     //////////////////////////////////////////////////////////////////////
     // run
     double runtime = 0;
     int min_f_val = 0;
     cbs.clear();
-    cbs.solve(vm["cutoffTime"].as<double>(), min_f_val);
+    cbs.setMutableAgents(mutable_agents_mask);
+    if (!mutable_temporal_landmarks_mask.empty()) {
+      cbs.setMutableTemporalLandmarksMask(mutable_temporal_landmarks_mask);
+    }
+    if (!initial_joined_paths.empty()) {
+      cbs.setInitialPaths(initial_joined_paths);
+    }
+    const bool solved = cbs.solve(vm["cutoffTime"].as<double>(), min_f_val);
     runtime += cbs.runtime;
     min_f_val = (int)cbs.min_f_val;
+    if (!solved) {
+      std::cerr << "CBS failed to find a valid solution" << std::endl;
+      return -1;
+    }
     cbs.randomRoot = true;
     cbs.runtime = runtime;
     if (vm.count("output"))
@@ -104,7 +552,7 @@ int main(int argc, char** argv) {
 
     vector<Path*> paths = cbs.getPaths();
     cout << "TASK PATHS" << endl;
-    for (int i = 0; i < vm["agentNum"].as<int>(); i++) {
+    for (int i = 0; i < num_agents; i++) {
       bool previousLocationWasGoal = true;
       cout << "Agent " << i << endl;
       for (int j = 0; j < paths[i]->size(); j++) {
@@ -122,26 +570,53 @@ int main(int argc, char** argv) {
       }
       cout << endl;
     }
-    cout << "Agent " << vm["agentNum"].as<int>() << endl;
+    cout << "Agent " << num_agents << endl;
     cbs.clearSearchEngines();
 
   } else if (vm["solver"].as<string>() == "PBS") {
-    PBS pbs(instance, vm["screen"].as<int>());
+    PBS pbs(instance, useSippLowLevel, vm["screen"].as<int>());
+    pbs.setLowLevelSuboptimality(sippsSuboptimality);
     //////////////////////////////////////////////////////////////////////
     // run
     double runtime = 0;
     int min_f_val = 0;
     pbs.clear();
-    pbs.solve(vm["cutoffTime"].as<double>(), min_f_val);
+    pbs.setMutableAgents(mutable_agents_mask);
+    if (!mutable_task_mask.empty()) {
+      pbs.setMutableTasksMask(mutable_task_mask);
+    }
+    if (!initial_joined_paths.empty()) {
+      std::vector<int> goals_per_agent(num_agents, 1);
+      for (int i = 0; i < num_agents; i++) {
+        goals_per_agent[i] = std::max(1, (int)task_plan[i].size());
+      }
+      std::vector<Path> initial_task_paths;
+      std::string split_error;
+      if (!splitJoinedPathsForPBS(initial_joined_paths, goals_per_agent,
+                                  mutable_agents_mask,
+                                  !mutable_task_mask.empty(),
+                                  mutable_task_mask.empty() ? nullptr : &mutable_task_mask,
+                                  initial_task_paths, split_error)) {
+        std::cerr << "Failed to split initial joined paths for PBS: "
+                  << split_error << std::endl;
+        return -1;
+      }
+      pbs.setInitialTaskPaths(initial_task_paths);
+    }
+    const bool solved = pbs.solve(vm["cutoffTime"].as<double>(), min_f_val);
     runtime += pbs.runtime;
     min_f_val = (int)pbs.min_f_val;
+    if (!solved) {
+      std::cerr << "PBS failed to find a valid solution" << std::endl;
+      return -1;
+    }
     pbs.randomRoot = true;
     pbs.runtime = runtime;
     if (vm.count("output"))
       pbs.saveResults(vm["output"].as<string>(), vm["agents"].as<string>());
     vector<Path*> paths = pbs.getPaths();
     cout << "TASK PATHS" << endl;
-    for (int i = 0; i < vm["agentNum"].as<int>(); i++) {
+    for (int i = 0; i < num_agents; i++) {
       bool previousLocationWasGoal = true;
       cout << "Agent " << i << endl;
       for (int j = 0; j < paths[i]->size(); j++) {
@@ -159,18 +634,23 @@ int main(int argc, char** argv) {
       }
       cout << endl;
     }
-    cout << "Agent " << vm["agentNum"].as<int>() << endl;
+    cout << "Agent " << num_agents << endl;
     pbs.clearSearchEngines();
   } else if (vm["solver"].as<string>() == "PBSN") {
-    PBS_naive pbs(instance, vm["screen"].as<int>());
+    PBS_naive pbs(instance, useSippLowLevel, vm["screen"].as<int>());
+    pbs.setLowLevelSuboptimality(sippsSuboptimality);
     //////////////////////////////////////////////////////////////////////
     // run
     double runtime = 0;
     int min_f_val = 0;
     pbs.clear();
-    pbs.solve(vm["cutoffTime"].as<double>(), min_f_val);
+    const bool solved = pbs.solve(vm["cutoffTime"].as<double>(), min_f_val);
     runtime += pbs.runtime;
     min_f_val = (int)pbs.min_f_val;
+    if (!solved) {
+      std::cerr << "PBSN failed to find a valid solution" << std::endl;
+      return -1;
+    }
     pbs.randomRoot = true;
     pbs.runtime = runtime;
     if (vm.count("output"))

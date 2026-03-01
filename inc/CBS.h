@@ -57,6 +57,13 @@ public:
   void setNodeSelectionRule(node_selection n) { node_selection_rule = n; heuristic_helper->node_selection_rule = n; }
   void setNodeLimit(int n) { node_limit = n; }
   void setSTP(bool s) {stp_helper.set_flag(s); }
+  void setLowLevelSuboptimality(double w) {
+    for (auto* engine : search_engines) {
+      if (engine != nullptr) {
+        engine->setLowLevelSuboptimality(w);
+      }
+    }
+  }
   void setUsingTimestamps(bool b) {
     for (auto ptr: search_engines){
       ptr->use_timestamps = b;
@@ -78,6 +85,37 @@ public:
     return paths;
   }
 
+  void setInitialPaths(const vector<Path>& initial_paths) {
+    paths_found_initially = initial_paths;
+  }
+
+  void setMutableAgents(const vector<bool>& mutable_agents) {
+    if ((int)mutable_agents.size() != num_of_agents) {
+      cerr << "setMutableAgents size mismatch: got "
+           << mutable_agents.size() << ", expected " << num_of_agents
+           << endl;
+      mutable_agents_mask.assign(num_of_agents, true);
+      return;
+    }
+    mutable_agents_mask = mutable_agents;
+  }
+
+  // Optional mini-repair temporal scope mask.
+  // mask[agent][landmark] == true means this landmark belongs to mutable
+  // neighborhood task space, so temporal conflicts involving it should be
+  // considered during mini CBS.
+  void setMutableTemporalLandmarksMask(
+      const vector<vector<bool>>& mutable_temporal_landmarks_mask) {
+    if ((int)mutable_temporal_landmarks_mask.size() != num_of_agents) {
+      cerr << "setMutableTemporalLandmarksMask size mismatch: got "
+           << mutable_temporal_landmarks_mask.size() << ", expected "
+           << num_of_agents << endl;
+      mutable_temporal_landmarks_mask_.clear();
+      return;
+    }
+    mutable_temporal_landmarks_mask_ = mutable_temporal_landmarks_mask;
+  }
+
   // Save results
   void saveResults(const string& fileName, const string& instanceName) const;
 
@@ -86,6 +124,57 @@ public:
   vector<ConstraintTable> initial_constraints;
 
 protected:
+  inline bool canReplanAgent(int agent) const {
+    return agent >= 0 && agent < num_of_agents &&
+           (mutable_agents_mask.empty() || mutable_agents_mask[agent]);
+  }
+
+  inline bool isMutableTemporalLandmark(int agent, int landmark) const {
+    if (agent < 0 || agent >= (int)mutable_temporal_landmarks_mask_.size()) {
+      return false;
+    }
+    const auto& row = mutable_temporal_landmarks_mask_[agent];
+    return landmark >= 0 && landmark < (int)row.size() && row[landmark];
+  }
+
+  inline bool shouldCheckTemporalConstraint(int a1, int l1, int a2,
+                                            int l2) const {
+    if (mutable_temporal_landmarks_mask_.empty()) {
+      return true;
+    }
+    const bool a1_mut = isMutableTemporalLandmark(a1, l1);
+    const bool a2_mut = isMutableTemporalLandmark(a2, l2);
+    // Mini scope: keep boundary/mutable checks, skip frozen-frozen.
+    return a1_mut || a2_mut;
+  }
+
+  inline bool useSippFrozenSoftConflictMode() const {
+    if (search_engines.empty() || search_engines[0] == nullptr) {
+      return false;
+    }
+    if (search_engines[0]->getName() != "SIPP") {
+      return false;
+    }
+    if (mutable_agents_mask.empty()) {
+      return false;
+    }
+    for (bool can_replan : mutable_agents_mask) {
+      if (!can_replan) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  inline bool shouldCheckStandardConflictPair(int a1, int a2) const {
+    if (!useSippFrozenSoftConflictMode()) {
+      return true;
+    }
+    // In mini SIPP mode, frozen-agent paths are CAT-soft references.
+    // Keep hard CBS conflicts only among mutable agents.
+    return canReplanAgent(a1) && canReplanAgent(a2);
+  }
+
   bool target_reasoning; // using target reasoning
   bool disjoint_splitting; // disjoint splitting
   bool mutex_reasoning; // using mutex reasoning
@@ -125,6 +214,8 @@ protected:
   vector<Path> paths_found_initially;  // contain initial paths found
   // vector<MDD*> mdds_initially;  // contain initial paths found
   vector<SingleAgentSolver*> search_engines;  // used to find (single) agents' paths and mdd
+  vector<bool> mutable_agents_mask;
+  vector<vector<bool>> mutable_temporal_landmarks_mask_;
 
   // init helper
   void init_heuristic(heuristics_type heuristic);
@@ -149,9 +240,9 @@ protected:
   void computePriorityForConflict(Conflict& conflict, CBSNode& node);
 
   //update information
-  inline void updatePaths(CBSNode* curr);
+  void updatePaths(CBSNode* curr);
   void updateFocalList();
-  inline void releaseNodes();
+  void releaseNodes();
   //inline void releaseMDDTable();
   // void copyConflictGraph(CBSNode& child, const CBSNode& parent);
 

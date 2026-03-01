@@ -2,6 +2,7 @@
 
 #include "common.h"
 #include "CBSNode.h"
+#include <stdexcept>
 
 
 class ConstraintTable
@@ -19,17 +20,24 @@ public:
   vector<int> g_goal_time;
 
 	int getHoldingTime(); // the earliest timestep that the agent can hold its goal location
+	int getLastCollisionTimestep(size_t loc) const;
 
 	// void clear(){ct.clear(); cat_small.clear(); cat_large.clear(); landmarks.clear(); length_min = 0, length_max = INT_MAX; latest_timestep = 0;}
 
 	bool constrained(size_t loc, int t) const;
 	bool constrained(size_t curr_loc, size_t next_loc, int next_t) const;
 	int getNumOfConflictsForStep(size_t curr_id, size_t next_id, int next_timestep) const;
+	int getFutureNumOfCollisions(size_t loc, int timestep) const;
+	int getCATVertexConflictCount(size_t loc, int timestep) const;
+	int getCATEdgeConflictCount(size_t curr_id, size_t next_id, int next_timestep) const;
+	bool hasCATVertexConflict(size_t loc, int timestep) const;
+	bool hasCATEdgeConflict(size_t curr_id, size_t next_id, int next_timestep) const;
 	ConstraintTable() = default;
 	ConstraintTable(size_t num_col, size_t map_size, int goal_location = -1) : goal_location(goal_location), num_col(num_col), map_size(map_size) {}
 	ConstraintTable(const ConstraintTable& other) { copy(other); }
 
 	void copy(const ConstraintTable& other);
+	void copyCAT(const ConstraintTable& other);
 	void build(const CBSNode& node, int agent, int num_of_stops); // build the constraint table for the given agent at the given node
 	void buildCAT(int agent, const vector<Path*>& paths, size_t cat_size); // build the conflict avoidance table
 
@@ -49,12 +57,18 @@ protected:
 
 	void insertLandmark(size_t loc, int t); // insert a landmark, i.e., the agent has to be at the given location at the given timestep
 
-	inline size_t getEdgeIndex(size_t from, size_t to) const { return (1 + from) * map_size + to; }
+	inline size_t getEdgeIndex(size_t from, size_t to) const
+	{
+		if (from >= map_size || to >= map_size)
+			throw std::out_of_range("ConstraintTable::getEdgeIndex: endpoint out of bounds");
+		assert(from < map_size && to < map_size);
+		return (1 + from) * map_size + to;
+	}
 
 private:
 	size_t map_size_threshold = 10000;
 	vector<list<size_t>> cat_large; // conflict avoidance table for large maps
-	vector<vector<bool>> cat_small; // conflict avoidance table for small maps
+	vector<vector<uint16_t>> cat_small; // per-(time,vertex) occupancy count
+	vector<unordered_map<size_t, uint16_t>> cat_small_edges; // per-time reverse-edge occupancy count
 
 };
-

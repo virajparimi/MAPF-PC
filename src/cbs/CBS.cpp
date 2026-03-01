@@ -1,14 +1,15 @@
 #include <algorithm>    // std::shuffle
 #include <random>      // std::default_random_engine
 #include <chrono>       // std::chrono::system_clock
+#include <cstdlib>
 #include "CBS.h"
-// #include "SIPP.h"
+#include "SIPP.h"
 #include "SpaceTimeAStar.h"
 
 
 // takes the paths_found_initially and UPDATE all (constrained) paths found for agents from curr to start
 // also, do the same for ll_min_f_vals and paths_costs (since its already "on the way").
-inline void CBS::updatePaths(CBSNode* curr)
+void CBS::updatePaths(CBSNode* curr)
 {
   for (int i = 0; i < num_of_agents; i++)
     paths[i] = &paths_found_initially[i];
@@ -69,10 +70,14 @@ void CBS::copyConflicts(const list<shared_ptr<Conflict >>& conflicts,
 
 void CBS::findConflicts(CBSNode& curr, int a1, int a2)
 {
+  const bool check_standard_pair = shouldCheckStandardConflictPair(a1, a2);
 
   for (auto cons: search_engines[0]->instance.temporal_cons[a1 * num_of_agents + a2]){
     auto from_landmark = cons.first;
     auto to_landmark = cons.second;
+    if (!shouldCheckTemporalConstraint(a1, from_landmark, a2, to_landmark)) {
+      continue;
+    }
     if (paths[a1]->timestamps[from_landmark] >= paths[a2]->timestamps[to_landmark]){
       cout << "Temporal conflict between " << a1  << "(" << from_landmark<< ")" << " and " << a2 << "(" << to_landmark<< ")" << endl;
       shared_ptr<Conflict> conflict(new Conflict());
@@ -83,6 +88,9 @@ void CBS::findConflicts(CBSNode& curr, int a1, int a2)
   for (auto cons: search_engines[0]->instance.temporal_cons[a2 * num_of_agents + a1]){
     auto from_landmark = cons.first;
     auto to_landmark = cons.second;
+    if (!shouldCheckTemporalConstraint(a2, from_landmark, a1, to_landmark)) {
+      continue;
+    }
     if (paths[a2]->timestamps[from_landmark] >= paths[a1]->timestamps[to_landmark]){
       cout << "Temporal conflict between " << a2  << "(" << from_landmark<< ")" << " and " << a1 << "(" << to_landmark<< ")" << endl;
       shared_ptr<Conflict> conflict(new Conflict());
@@ -91,59 +99,62 @@ void CBS::findConflicts(CBSNode& curr, int a1, int a2)
     }
   }
 
-  size_t min_path_length = paths[a1]->size() < paths[a2]->size() ? paths[a1]->size() : paths[a2]->size();
-  for (size_t timestep = 0; timestep < min_path_length; timestep++)
+  if (check_standard_pair)
   {
-    int loc1 = paths[a1]->at(timestep).location;
-    int loc2 = paths[a2]->at(timestep).location;
-    if (loc1 == loc2)
+    size_t min_path_length = paths[a1]->size() < paths[a2]->size() ? paths[a1]->size() : paths[a2]->size();
+    for (size_t timestep = 0; timestep < min_path_length; timestep++)
     {
-      shared_ptr<Conflict> conflict(new Conflict());
-      if (target_reasoning && paths[a1]->size() == timestep + 1)
-      {
-        conflict->targetConflict(a1, a2, loc1, timestep);
-      }
-      else if (target_reasoning && paths[a2]->size() == timestep + 1)
-      {
-        conflict->targetConflict(a2, a1, loc1, timestep);
-      }
-      else
-      {
-        conflict->vertexConflict(a1, a2, loc1, timestep);
-      }
-      assert(!conflict->constraint1.empty());
-      assert(!conflict->constraint2.empty());
-      curr.unknownConf.push_back(conflict);
-    }
-    else if (timestep < min_path_length - 1
-         && loc1 == paths[a2]->at(timestep + 1).location
-         && loc2 == paths[a1]->at(timestep + 1).location)
-    {
-      shared_ptr<Conflict> conflict(new Conflict());
-      conflict->edgeConflict(a1, a2, loc1, loc2, timestep + 1);
-      assert(!conflict->constraint1.empty());
-      assert(!conflict->constraint2.empty());
-      curr.unknownConf.push_back(conflict); // edge conflict
-    }
-  }
-  if (paths[a1]->size() != paths[a2]->size())
-  {
-    int a1_ = paths[a1]->size() < paths[a2]->size() ? a1 : a2;
-    int a2_ = paths[a1]->size() < paths[a2]->size() ? a2 : a1;
-    int loc1 = paths[a1_]->back().location;
-    for (size_t timestep = min_path_length; timestep < paths[a2_]->size(); timestep++)
-    {
-      int loc2 = paths[a2_]->at(timestep).location;
+      int loc1 = paths[a1]->at(timestep).location;
+      int loc2 = paths[a2]->at(timestep).location;
       if (loc1 == loc2)
       {
         shared_ptr<Conflict> conflict(new Conflict());
-        if (target_reasoning)
-          conflict->targetConflict(a1_, a2_, loc1, timestep);
+        if (target_reasoning && paths[a1]->size() == timestep + 1)
+        {
+          conflict->targetConflict(a1, a2, loc1, timestep);
+        }
+        else if (target_reasoning && paths[a2]->size() == timestep + 1)
+        {
+          conflict->targetConflict(a2, a1, loc1, timestep);
+        }
         else
-          conflict->vertexConflict(a1_, a2_, loc1, timestep);
+        {
+          conflict->vertexConflict(a1, a2, loc1, timestep);
+        }
         assert(!conflict->constraint1.empty());
         assert(!conflict->constraint2.empty());
-        curr.unknownConf.push_front(conflict); // It's at least a semi conflict
+        curr.unknownConf.push_back(conflict);
+      }
+      else if (timestep < min_path_length - 1
+           && loc1 == paths[a2]->at(timestep + 1).location
+           && loc2 == paths[a1]->at(timestep + 1).location)
+      {
+        shared_ptr<Conflict> conflict(new Conflict());
+        conflict->edgeConflict(a1, a2, loc1, loc2, timestep + 1);
+        assert(!conflict->constraint1.empty());
+        assert(!conflict->constraint2.empty());
+        curr.unknownConf.push_back(conflict); // edge conflict
+      }
+    }
+    if (paths[a1]->size() != paths[a2]->size())
+    {
+      int a1_ = paths[a1]->size() < paths[a2]->size() ? a1 : a2;
+      int a2_ = paths[a1]->size() < paths[a2]->size() ? a2 : a1;
+      int loc1 = paths[a1_]->back().location;
+      for (size_t timestep = min_path_length; timestep < paths[a2_]->size(); timestep++)
+      {
+        int loc2 = paths[a2_]->at(timestep).location;
+        if (loc1 == loc2)
+        {
+          shared_ptr<Conflict> conflict(new Conflict());
+          if (target_reasoning)
+            conflict->targetConflict(a1_, a2_, loc1, timestep);
+          else
+            conflict->vertexConflict(a1_, a2_, loc1, timestep);
+          assert(!conflict->constraint1.empty());
+          assert(!conflict->constraint2.empty());
+          curr.unknownConf.push_front(conflict); // It's at least a semi conflict
+        }
       }
     }
   }
@@ -468,6 +479,15 @@ void CBS::removeLowPriorityConflicts(list<shared_ptr<Conflict>>& conflicts) cons
 
 bool CBS::findPathForSingleAgent(CBSNode* node, int ag, int lowerbound)
 {
+  if (!canReplanAgent(ag))
+  {
+    if (screen >= 2)
+    {
+      cout << "Skip replanning fixed agent " << ag << endl;
+    }
+    return false;
+  }
+
   clock_t t = clock();
   // build reservation table
   // CAT cat(node->makespan + 1);  // initialized to false
@@ -481,7 +501,15 @@ bool CBS::findPathForSingleAgent(CBSNode* node, int ag, int lowerbound)
   runtime_path_finding += (double) (clock() - t) / CLOCKS_PER_SEC;
   if (!new_path.empty())
   {
-    assert(!isSamePath(*paths[ag], new_path));
+    if (isSamePath(*paths[ag], new_path))
+    {
+      if (screen >= 2)
+      {
+        cout << "Replan produced identical path for agent " << ag
+             << "; pruning child" << endl;
+      }
+      return false;
+    }
     node->paths.emplace_back(ag, new_path);
     node->g_val = node->g_val - (int) paths[ag]->size() + (int) new_path.size();
     paths[ag] = &node->paths.back().second;
@@ -495,6 +523,43 @@ bool CBS::findPathForSingleAgent(CBSNode* node, int ag, int lowerbound)
         cout << "->";
       }
       cout << endl;
+
+      const char* debug_path_agent_env = std::getenv("MAPFPC_DEBUG_AGENT_PATHS");
+      bool debug_full_path = false;
+      if (debug_path_agent_env != nullptr) {
+        debug_full_path = (std::atoi(debug_path_agent_env) == ag);
+      }
+      if (debug_full_path) {
+        static int debug_dump_count = 0;
+        int debug_dump_limit = 0;
+        if (const char* debug_path_limit_env = std::getenv("MAPFPC_DEBUG_AGENT_PATHS_MAX")) {
+          debug_dump_limit = std::atoi(debug_path_limit_env);
+        }
+        if (debug_dump_limit <= 0 || debug_dump_count < debug_dump_limit) {
+          debug_dump_count++;
+          cout << "[PATH_DEBUG] agent " << ag
+               << " replan#" << debug_dump_count
+               << " len=" << (int)new_path.size() - 1
+               << " constraints=" << node->constraints.size() << endl;
+          if (!node->constraints.empty()) {
+            cout << "[PATH_DEBUG] agent " << ag << " node_constraints:";
+            for (const auto& con : node->constraints) {
+              cout << " " << con;
+            }
+            cout << endl;
+          }
+          cout << "[PATH_DEBUG] agent " << ag << " full_path:";
+          for (int t = 0; t < (int)new_path.size(); t++) {
+            const int loc = new_path.at(t).location;
+            cout << " (" << instance->getRowCoordinate(loc) << ", "
+                 << instance->getColCoordinate(loc) << ")@" << t;
+            if (new_path.at(t).is_goal) {
+              cout << "*";
+            }
+          }
+          cout << endl;
+        }
+      }
     }
 
     return true;
@@ -597,13 +662,24 @@ bool CBS::generateChild(CBSNode* node, CBSNode* parent)
       int a, x, y, t;
       constraint_type type;
       tie(a, x, y, t, type) = con;
+      const bool is_mutable = canReplanAgent(a);
       if (type == constraint_type::LEQSTOP){
         if (paths[a]->timestamps[x] > t){
+          if (!is_mutable)
+          {
+            runtime_generate_child += (double) (clock() - t1) / CLOCKS_PER_SEC;
+            return false;
+          }
           agents_need_replan.insert(a);
         }
       }
       if (type == constraint_type::GSTOP ){
         if (paths[a]->timestamps[x] <= t){
+          if (!is_mutable)
+          {
+            runtime_generate_child += (double) (clock() - t1) / CLOCKS_PER_SEC;
+            return false;
+          }
           agents_need_replan.insert(a);
         }
       }
@@ -913,6 +989,7 @@ bool CBS::solve(double time_limit, int cost_lowerbound, int cost_upperbound)
       }
       foundBypass = false;
       CBSNode* child[2] = { new CBSNode(), new CBSNode() };
+      bool child_active[2] = { true, true };
 
       curr->conflict = chooseConflict(*curr);
 
@@ -954,8 +1031,76 @@ bool CBS::solve(double time_limit, int cost_lowerbound, int cost_upperbound)
       }
       else
       {
-        child[0]->constraints = curr->conflict->constraint1;
-        child[1]->constraints = curr->conflict->constraint2;
+        if (curr->conflict->type == conflict_type::TEMPORAL)
+        {
+          int a1, i1, y1, t1;
+          int a2, i2, y2, t2;
+          constraint_type type1, type2;
+          tie(a1, i1, y1, t1, type1) = curr->conflict->constraint1.front();
+          tie(a2, i2, y2, t2, type2) = curr->conflict->constraint2.front();
+          const bool a1_mutable = canReplanAgent(a1);
+          const bool a2_mutable = canReplanAgent(a2);
+          bool specialized_temporal_split = false;
+
+          // For mutable-vs-frozen temporal conflicts, branch only on mutable
+          // side with a bound grounded at the frozen timestamp.
+          if (a1_mutable != a2_mutable)
+          {
+            if (a1_mutable &&
+                i1 >= 0 && i1 < (int)paths[a1]->timestamps.size() &&
+                i2 >= 0 && i2 < (int)paths[a2]->timestamps.size())
+            {
+              const int frozen_time = paths[a2]->timestamps[i2];
+              child[0]->constraints.clear();
+              child[0]->constraints.emplace_back(
+                  a1, i1, -1, frozen_time - 1, constraint_type::LEQSTOP);
+              child_active[1] = false;
+              specialized_temporal_split = true;
+            }
+            else if (a2_mutable &&
+                     i2 >= 0 && i2 < (int)paths[a2]->timestamps.size() &&
+                     i1 >= 0 && i1 < (int)paths[a1]->timestamps.size())
+            {
+              const int frozen_time = paths[a1]->timestamps[i1];
+              child[1]->constraints.clear();
+              child[1]->constraints.emplace_back(a2, i2, -1, frozen_time,
+                                                 constraint_type::GSTOP);
+              child_active[0] = false;
+              specialized_temporal_split = true;
+            }
+          }
+
+          if (specialized_temporal_split)
+          {
+            // specialized temporal split already prepared
+          }
+          else
+
+          {
+            if (a1_mutable)
+            {
+              child[0]->constraints = curr->conflict->constraint1;
+            }
+            else
+            {
+              child_active[0] = false;
+            }
+
+            if (a2_mutable)
+            {
+              child[1]->constraints = curr->conflict->constraint2;
+            }
+            else
+            {
+              child_active[1] = false;
+            }
+          }
+        }
+        else
+        {
+          child[0]->constraints = curr->conflict->constraint1;
+          child[1]->constraints = curr->conflict->constraint2;
+        }
       }
 
       if (screen > 1)
@@ -967,6 +1112,8 @@ bool CBS::solve(double time_limit, int cost_lowerbound, int cost_upperbound)
 
       for (int i = 0; i < 2; i++)
       {
+        if (!child_active[i] || child[i] == nullptr)
+          continue;
         if (i > 0)
           paths = copy;
         solved[i] = generateChild(child[i], curr);
@@ -1098,6 +1245,7 @@ CBS::CBS(vector<SingleAgentSolver*>& search_engines,
     corridor_helper(search_engines, initial_constraints)
 {
   num_of_agents = (int) search_engines.size();
+  mutable_agents_mask.assign(num_of_agents, true);
   init_heuristic(heuristic);
   mutex_helper.search_engines = search_engines;
 }
@@ -1118,17 +1266,15 @@ CBS::CBS(const Instance& instance, bool sipp, heuristics_type heuristic, int scr
   search_engines.resize(num_of_agents);
   for (int i = 0; i < num_of_agents; i++)
   {
-    if (sipp){
-      cout << "SIPP not implemented" << endl;
-      assert(false);
-      // search_engines[i] = new SIPP(instance, i);
-    }else{
+    if (sipp)
+      search_engines[i] = new MultiLabelSIPP(instance, i);
+    else
       search_engines[i] = new MultiLabelSpaceTimeAStar(instance, i);
-    }
 
     initial_constraints[i].goal_location = search_engines[i]->goal_location.back();
   }
   runtime_preprocessing = (double) (clock() - t) / CLOCKS_PER_SEC;
+  mutable_agents_mask.assign(num_of_agents, true);
 
   init_heuristic(heuristic);
 
@@ -1201,11 +1347,71 @@ bool CBS::generateRoot()
   }
   else
   {
+    if ((int)paths_found_initially.size() != num_of_agents)
+    {
+      cout << "Invalid initial path set size: got "
+           << paths_found_initially.size() << ", expected " << num_of_agents
+           << endl;
+      return false;
+    }
+    // Mini-repair mode: keep fixed-agent seeds, replan mutable agents at root.
+    // This avoids global root replanning when only a neighborhood is mutable.
+    vector<int> mutable_agents;
+    mutable_agents.reserve(num_of_agents);
+
     for (int i = 0; i < num_of_agents; i++)
     {
+      if (!canReplanAgent(i))
+      {
+        if (paths_found_initially[i].empty())
+        {
+          cout << "Initial path for fixed agent " << i << " is empty" << endl;
+          return false;
+        }
+        if (!search_engines[i]->goal_location.empty() &&
+            (int)paths_found_initially[i].timestamps.size() !=
+                (int)search_engines[i]->goal_location.size())
+        {
+          cout << "Initial path timestamp count mismatch for fixed agent " << i
+               << " (got " << paths_found_initially[i].timestamps.size()
+               << ", expected " << search_engines[i]->goal_location.size()
+               << ")" << endl;
+          return false;
+        }
+        paths[i] = &paths_found_initially[i];
+        dummy_start->makespan =
+            max(dummy_start->makespan, paths_found_initially[i].size() - 1);
+        dummy_start->g_val += (int)paths_found_initially[i].size() - 1;
+      }
+      else
+      {
+        mutable_agents.push_back(i);
+        paths[i] = nullptr;
+      }
+    }
+
+    if (randomRoot && !mutable_agents.empty())
+    {
+      std::random_device rd;
+      std::mt19937 g(rd());
+      std::shuffle(std::begin(mutable_agents), std::end(mutable_agents), g);
+    }
+
+    for (int i : mutable_agents)
+    {
+      paths_found_initially[i] =
+          search_engines[i]->findPath(*dummy_start, initial_constraints[i], paths, i, 0);
+      if (paths_found_initially[i].empty())
+      {
+        cout << "No path exists for mutable agent " << i << endl;
+        return false;
+      }
       paths[i] = &paths_found_initially[i];
-      dummy_start->makespan = max(dummy_start->makespan, paths_found_initially[i].size() - 1);
-      dummy_start->g_val += (int) paths_found_initially[i].size() - 1;
+      dummy_start->makespan =
+          max(dummy_start->makespan, paths_found_initially[i].size() - 1);
+      dummy_start->g_val += (int)paths_found_initially[i].size() - 1;
+      num_LL_expanded += search_engines[i]->num_expanded;
+      num_LL_generated += search_engines[i]->num_generated;
     }
   }
 
@@ -1232,10 +1438,14 @@ bool CBS::generateRoot()
   return true;
 }
 
-inline void CBS::releaseNodes()
+void CBS::releaseNodes()
 {
-  open_list.clear();
-  focal_list.clear();
+  // Boost pairing_heap::clear() recursively clears subtrees and can overflow
+  // stack on very deep heaps; drain iteratively instead.
+  while (!open_list.empty())
+    open_list.pop();
+  while (!focal_list.empty())
+    focal_list.pop();
   for (auto node : allNodes_table)
     delete node;
   allNodes_table.clear();
@@ -1273,9 +1483,14 @@ bool CBS::validateSolution() const
     for (int a2 = 0; a2 < num_of_agents; a2++)
     {
       if (a1 == a2){continue;}
+      const bool check_standard_pair = shouldCheckStandardConflictPair(a1, a2);
       for (auto cons: search_engines[0]->instance.temporal_cons[a1 * num_of_agents + a2]){
         auto from_landmark = cons.first;
         auto to_landmark = cons.second;
+        if (!shouldCheckTemporalConstraint(a1, from_landmark, a2,
+                                           to_landmark)) {
+          continue;
+        }
         if (paths[a1]->timestamps[from_landmark] >= paths[a2]->timestamps[to_landmark]){
           cout << "Temporal conflict between " << a1  << "(" << from_landmark<< ")" << " and " << a2 << "(" << to_landmark<< ")" << endl;
           return false;
@@ -1283,37 +1498,40 @@ bool CBS::validateSolution() const
       }
 
 
-      size_t min_path_length = paths[a1]->size() < paths[a2]->size() ? paths[a1]->size() : paths[a2]->size();
-      for (size_t timestep = 0; timestep < min_path_length; timestep++)
+      if (check_standard_pair)
       {
-        int loc1 = paths[a1]->at(timestep).location;
-        int loc2 = paths[a2]->at(timestep).location;
-        if (loc1 == loc2)
+        size_t min_path_length = paths[a1]->size() < paths[a2]->size() ? paths[a1]->size() : paths[a2]->size();
+        for (size_t timestep = 0; timestep < min_path_length; timestep++)
         {
-          cout << "Agents " << a1 << " and " << a2 << " collides at " << loc1 << " at timestep " << timestep << endl;
-          return false;
-        }
-        else if (timestep < min_path_length - 1
-             && loc1 == paths[a2]->at(timestep + 1).location
-             && loc2 == paths[a1]->at(timestep + 1).location)
-        {
-          cout << "Agents " << a1 << " and " << a2 << " collides at (" <<
-             loc1 << "-->" << loc2 << ") at timestep " << timestep << endl;
-          return false;
-        }
-      }
-      if (paths[a1]->size() != paths[a2]->size())
-      {
-        int a1_ = paths[a1]->size() < paths[a2]->size() ? a1 : a2;
-        int a2_ = paths[a1]->size() < paths[a2]->size() ? a2 : a1;
-        int loc1 = paths[a1_]->back().location;
-        for (size_t timestep = min_path_length; timestep < paths[a2_]->size(); timestep++)
-        {
-          int loc2 = paths[a2_]->at(timestep).location;
+          int loc1 = paths[a1]->at(timestep).location;
+          int loc2 = paths[a2]->at(timestep).location;
           if (loc1 == loc2)
           {
             cout << "Agents " << a1 << " and " << a2 << " collides at " << loc1 << " at timestep " << timestep << endl;
-            return false; // It's at least a semi conflict
+            return false;
+          }
+          else if (timestep < min_path_length - 1
+               && loc1 == paths[a2]->at(timestep + 1).location
+               && loc2 == paths[a1]->at(timestep + 1).location)
+          {
+            cout << "Agents " << a1 << " and " << a2 << " collides at (" <<
+               loc1 << "-->" << loc2 << ") at timestep " << timestep << endl;
+            return false;
+          }
+        }
+        if (paths[a1]->size() != paths[a2]->size())
+        {
+          int a1_ = paths[a1]->size() < paths[a2]->size() ? a1 : a2;
+          int a2_ = paths[a1]->size() < paths[a2]->size() ? a2 : a1;
+          int loc1 = paths[a1_]->back().location;
+          for (size_t timestep = min_path_length; timestep < paths[a2_]->size(); timestep++)
+          {
+            int loc2 = paths[a2_]->at(timestep).location;
+            if (loc1 == loc2)
+            {
+              cout << "Agents " << a1 << " and " << a2 << " collides at " << loc1 << " at timestep " << timestep << endl;
+              return false; // It's at least a semi conflict
+            }
           }
         }
       }

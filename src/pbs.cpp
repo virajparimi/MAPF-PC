@@ -4,6 +4,8 @@
 */
 #include <boost/program_options.hpp>
 #include <boost/tokenizer.hpp>
+#include <algorithm>
+#include <cctype>
 #include "PBS.h"
 
 /* Declare some static utility functions */
@@ -30,8 +32,12 @@ int main(int argc, char** argv)
 		("rows", po::value<int>()->default_value(0), "number of rows")
 		("cols", po::value<int>()->default_value(0), "number of columns")
 		("obs", po::value<int>()->default_value(0), "number of obstacles")
-		("warehouseWidth", po::value<int>()->default_value(0), "width of working stations on both sides, for generating instances")
-		;
+	    ("warehouseWidth", po::value<int>()->default_value(0), "width of working stations on both sides, for generating instances")
+	    ("lowLevelPlanner", po::value<string>()->default_value("mlastar"),
+	     "low-level planner: mlastar or sipps")
+      ("sippsSuboptimality", po::value<double>()->default_value(1.0),
+       "SIPPS low-level suboptimality bound (>=1.0)")
+			;
 
 	po::variables_map vm;
 	po::store(po::parse_command_line(argc, argv, desc), vm);
@@ -44,6 +50,19 @@ int main(int argc, char** argv)
 	}
 
 	po::notify(vm);
+  string lowLevelPlanner = vm["lowLevelPlanner"].as<string>();
+  for (char& ch : lowLevelPlanner) {
+    ch = (char)std::tolower((unsigned char)ch);
+  }
+	  const bool useSippLowLevel =
+	      (lowLevelPlanner == "sipp" || lowLevelPlanner == "sipps");
+  const double sippsSuboptimality =
+      std::max(1.0, vm["sippsSuboptimality"].as<double>());
+  if (!useSippLowLevel && lowLevelPlanner != "mlastar") {
+    cerr << "Unknown lowLevelPlanner '" << vm["lowLevelPlanner"].as<string>()
+         << "'. Expected mlastar or sipps." << endl;
+    return -1;
+  }
 	/////////////////////////////////////////////////////////////////////////
 	// check the correctness and consistence of params
 	/*if (vm["sipp"].as<bool>() && vm["targetReasoning"].as<bool>())
@@ -67,7 +86,8 @@ int main(int argc, char** argv)
 	
 	//////////////////////////////////////////////////////////////////////
 	// initialize the solver
-	PBS pbs(instance, vm["screen"].as<int>());
+		PBS pbs(instance, useSippLowLevel, vm["screen"].as<int>());
+    pbs.setLowLevelSuboptimality(sippsSuboptimality);
 	//////////////////////////////////////////////////////////////////////
 	// run
 	double runtime = 0;

@@ -9,6 +9,7 @@ class TaskAssignment : public Instance {
   TaskAssignment(const string& map_fname, const string& agent_fname,
                  int num_of_agents = 0);
   void find_greedy_plan();
+  bool loadFixedAssignmentFromFile(const string& assignment_fname);
   vector<vector<int>> getTaskPlans() { return task_plan; }
 
  protected:
@@ -24,4 +25,5 @@ class TaskAssignment : public Instance {
   bool loadKivaMap();
   bool loadAgents();
   bool loadKivaAgentsAndTasks();
+  bool buildGoalsAndTemporalConstraintsFromTaskPlan();
 };

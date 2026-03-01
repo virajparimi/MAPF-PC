@@ -1,5 +1,6 @@
 #include "TaskAssignment.h"
 #include <boost/tokenizer.hpp>
+#include <sstream>
 
 TaskAssignment::TaskAssignment(const string& map_fname,
                                const string& agent_fname, int num_of_agents)
@@ -233,6 +234,312 @@ bool TaskAssignment::loadAgents() {
   return true;
 }
 
+bool TaskAssignment::loadFixedAssignmentFromFile(
+    const string& assignment_fname) {
+  using namespace std;
+
+  ifstream in(assignment_fname.c_str());
+  if (!in.is_open()) {
+    cerr << "Failed to open fixed assignment file " << assignment_fname << endl;
+    return false;
+  }
+
+  auto next_data_line = [&](string& out) -> bool {
+    while (getline(in, out)) {
+      const auto first = out.find_first_not_of(" \t\r\n");
+      if (first == string::npos) {
+        continue;
+      }
+      out = out.substr(first);
+      if (!out.empty() && out[0] == '#') {
+        continue;
+      }
+      return true;
+    }
+    return false;
+  };
+
+  string line;
+  if (!next_data_line(line)) {
+    cerr << "Fixed assignment file is empty: " << assignment_fname << endl;
+    return false;
+  }
+
+  auto finalize_plan = [&](vector<vector<int>> parsed_plan) -> bool {
+    vector<char> task_used(num_of_tasks, false);
+    int total_assigned = 0;
+    for (int agent = 0; agent < num_of_agents; agent++) {
+      for (int task_idx : parsed_plan[agent]) {
+        if (task_idx < 0 || task_idx >= num_of_tasks) {
+          cerr << "Task index out of range in fixed assignment file "
+               << assignment_fname << ": " << task_idx << endl;
+          return false;
+        }
+        if (task_used[task_idx]) {
+          cerr << "Duplicate task assignment in fixed assignment file "
+               << assignment_fname << ": task " << task_idx << endl;
+          return false;
+        }
+        task_used[task_idx] = true;
+        total_assigned++;
+      }
+    }
+    if (total_assigned != num_of_tasks) {
+      cerr << "Fixed assignment file does not assign all tasks: assigned="
+           << total_assigned << ", expected=" << num_of_tasks << " in "
+           << assignment_fname << endl;
+      return false;
+    }
+    task_plan = std::move(parsed_plan);
+    return buildGoalsAndTemporalConstraintsFromTaskPlan();
+  };
+
+  // Support MAPF-PC-LNS assignment logs:
+  // TASK ASSIGNMENTS
+  // Agent 0
+  // 1, 5, 8, ...
+  if (line.rfind("TASK ASSIGNMENTS", 0) == 0 ||
+      line.rfind("Agent", 0) == 0) {
+    vector<vector<int>> parsed_plan(num_of_agents);
+    bool has_pending_agent_header = false;
+    string pending_agent_header;
+
+    auto parse_agent_header = [&](const string& header, int expected_agent)
+        -> bool {
+      istringstream hss(header);
+      string tag;
+      string agent_token;
+      if (!(hss >> tag >> agent_token) || tag != "Agent") {
+        return false;
+      }
+      if (!agent_token.empty() && agent_token.back() == ':') {
+        agent_token.pop_back();
+      }
+      int parsed_agent = -1;
+      {
+        istringstream agent_ss(agent_token);
+        if (!(agent_ss >> parsed_agent)) {
+          return false;
+        }
+      }
+      if (parsed_agent != expected_agent) {
+        cerr << "Agent order mismatch in fixed assignment file "
+             << assignment_fname << ": expected Agent " << expected_agent
+             << ", got Agent " << parsed_agent << endl;
+        return false;
+      }
+      return true;
+    };
+
+    auto parse_task_id_row = [&](const string& row, vector<int>& out) {
+      string normalized = row;
+      for (char& ch : normalized) {
+        if (ch == ',' || ch == ';' || ch == '\t') {
+          ch = ' ';
+        }
+      }
+      istringstream iss(normalized);
+      int task_idx = -1;
+      while (iss >> task_idx) {
+        out.push_back(task_idx);
+      }
+    };
+
+    if (line.rfind("Agent", 0) == 0) {
+      has_pending_agent_header = true;
+      pending_agent_header = line;
+    }
+
+    for (int agent = 0; agent < num_of_agents; agent++) {
+      string agent_header;
+      if (has_pending_agent_header) {
+        agent_header = pending_agent_header;
+        has_pending_agent_header = false;
+      } else if (!next_data_line(agent_header)) {
+        cerr << "Unexpected end of file while reading Agent " << agent
+             << " in " << assignment_fname << endl;
+        return false;
+      }
+      if (!parse_agent_header(agent_header, agent)) {
+        cerr << "Malformed agent header '" << agent_header << "' in "
+             << assignment_fname << endl;
+        return false;
+      }
+
+      string tasks_line;
+      if (!next_data_line(tasks_line)) {
+        tasks_line.clear();  // allow trailing agents with no tasks
+      }
+
+      if (tasks_line.rfind("Agent", 0) == 0) {
+        // Agent has no tasks; keep this header for next loop.
+        has_pending_agent_header = true;
+        pending_agent_header = tasks_line;
+      } else if (tasks_line.rfind("TASK PATHS", 0) == 0 ||
+                 tasks_line.rfind("temporal cons:", 0) == 0) {
+        // End of assignment section.
+        has_pending_agent_header = false;
+      } else {
+        parse_task_id_row(tasks_line, parsed_plan[agent]);
+      }
+    }
+
+    return finalize_plan(std::move(parsed_plan));
+  }
+
+  // Legacy MAPF-PC assignment format:
+  // <agent_count>
+  // <goal_count> <start_x> <start_y> <goal1_x> <goal1_y> ...
+  int file_agents = -1;
+  {
+    istringstream iss(line);
+    if (!(iss >> file_agents)) {
+      cerr << "Failed to parse agent count from fixed assignment file: "
+           << assignment_fname << endl;
+      return false;
+    }
+  }
+  if (file_agents != num_of_agents) {
+    cerr << "Fixed assignment file agent count mismatch: file=" << file_agents
+         << ", expected=" << num_of_agents << endl;
+    return false;
+  }
+
+  unordered_map<int, vector<int>> tasks_by_location;
+  tasks_by_location.reserve((size_t)num_of_tasks * 2);
+  for (int t = 0; t < num_of_tasks; t++) {
+    tasks_by_location[task_locations[t]].push_back(t);
+  }
+
+  vector<vector<int>> parsed_plan(num_of_agents);
+  vector<char> task_used(num_of_tasks, false);
+
+  for (int agent = 0; agent < num_of_agents; agent++) {
+    if (!next_data_line(line)) {
+      cerr << "Unexpected end of file while reading assignments for agent "
+           << agent << " in " << assignment_fname << endl;
+      return false;
+    }
+    if (line.rfind("temporal cons:", 0) == 0) {
+      cerr << "Encountered temporal constraints before reading all agents in "
+           << assignment_fname << endl;
+      return false;
+    }
+
+    istringstream iss(line);
+    int goals = -1;
+    int sx = 0, sy = 0;
+    if (!(iss >> goals >> sx >> sy) || goals < 0) {
+      cerr << "Malformed assignment row for agent " << agent << " in "
+           << assignment_fname << endl;
+      return false;
+    }
+    const auto expected_start = getCoordinate(start_locations[agent]);
+    if (sx != expected_start.second || sy != expected_start.first) {
+      cerr << "Start coordinate mismatch for agent " << agent
+           << " in fixed assignment file " << assignment_fname << endl;
+      return false;
+    }
+
+    parsed_plan[agent].reserve(goals);
+    for (int g = 0; g < goals; g++) {
+      int gx = 0, gy = 0;
+      if (!(iss >> gx >> gy)) {
+        cerr << "Insufficient goal coordinates for agent " << agent
+             << " in fixed assignment file " << assignment_fname << endl;
+        return false;
+      }
+      const int location = linearizeCoordinate(gy, gx);
+      const auto it = tasks_by_location.find(location);
+      if (it == tasks_by_location.end()) {
+        cerr << "Goal location (" << gx << "," << gy
+             << ") does not match any task location in " << assignment_fname
+             << endl;
+        return false;
+      }
+
+      int selected_task = -1;
+      for (int candidate : it->second) {
+        if (!task_used[candidate]) {
+          selected_task = candidate;
+          break;
+        }
+      }
+      if (selected_task < 0) {
+        cerr << "All tasks at location (" << gx << "," << gy
+             << ") are already assigned in " << assignment_fname << endl;
+        return false;
+      }
+      task_used[selected_task] = true;
+      parsed_plan[agent].push_back(selected_task);
+    }
+  }
+  return finalize_plan(std::move(parsed_plan));
+}
+
+bool TaskAssignment::buildGoalsAndTemporalConstraintsFromTaskPlan() {
+  using namespace std;
+
+  if ((int)task_plan.size() != num_of_agents) {
+    cerr << "task_plan size does not match number of agents" << endl;
+    return false;
+  }
+
+  vector<pair<int, int>> task_to_agent_and_index(num_of_tasks, {-1, -1});
+  goal_locations.clear();
+  goal_locations.resize(num_of_agents);
+
+  for (int i = 0; i < num_of_agents; i++) {
+    for (int j = 0; j < (int)task_plan[i].size(); j++) {
+      const int task_idx = task_plan[i][j];
+      if (task_idx < 0 || task_idx >= num_of_tasks) {
+        cerr << "task index out of range in task_plan: " << task_idx << endl;
+        return false;
+      }
+      if (task_to_agent_and_index[task_idx].first != -1) {
+        cerr << "duplicate task assignment for task " << task_idx << endl;
+        return false;
+      }
+      task_to_agent_and_index[task_idx] = {i, j};
+      goal_locations[i].push_back(task_locations[task_idx]);
+    }
+    if (task_plan[i].empty()) {
+      goal_locations[i].push_back(start_locations[i]);
+    }
+  }
+
+  for (int task = 0; task < num_of_tasks; task++) {
+    if (task_to_agent_and_index[task].first < 0) {
+      cerr << "unassigned task in task_plan: " << task << endl;
+      return false;
+    }
+  }
+
+  temporal_cons.clear();
+  temporal_cons.resize(num_of_agents * num_of_agents);
+  for (const auto& dependence : temporal_dependecies) {
+    int task_i, task_j;
+    std::tie(task_i, task_j) = dependence;
+    if (task_i < 0 || task_i >= num_of_tasks || task_j < 0 ||
+        task_j >= num_of_tasks) {
+      cerr << "temporal dependency task out of range: " << task_i << " -> "
+           << task_j << endl;
+      return false;
+    }
+    int agent_i, i, agent_j, j;
+    std::tie(agent_i, i) = task_to_agent_and_index[task_i];
+    std::tie(agent_j, j) = task_to_agent_and_index[task_j];
+    if (agent_i < 0 || agent_j < 0) {
+      cerr << "temporal dependency references unassigned task: " << task_i
+           << " -> " << task_j << endl;
+      return false;
+    }
+    temporal_cons[agent_i * num_of_agents + agent_j].push_back({i, j});
+  }
+
+  return true;
+}
+
 void TaskAssignment::find_greedy_plan() {
 
   //
@@ -333,32 +640,9 @@ void TaskAssignment::find_greedy_plan() {
     }
   }
 
-  // write plan to goal_locations and temporal_dependencies;
-  vector<pair<int, int>> task_to_agent_and_index(num_of_tasks, {-1, -1});
-
-  goal_locations.clear();
-  goal_locations.resize(num_of_agents);
-  for (int i = 0; i < num_of_agents; i++) {
-    for (int j = 0; j < task_plan[i].size(); j++) {
-      auto task_idx = task_plan[i][j];
-      task_to_agent_and_index[task_idx] = {i, j};
-      goal_locations[i].push_back(task_locations[task_idx]);
-    }
-    if (task_plan[i].size() == 0) {
-      goal_locations[i].push_back(start_locations[i]);
-    }
-  }
-
-  temporal_cons.clear();
-  temporal_cons.resize(num_of_agents * num_of_agents);
-  for (auto dependence : temporal_dependecies) {
-    int task_i, task_j, agent_i, i, agent_j, j;
-    std::tie(task_i, task_j) = dependence;
-    std::tie(agent_i, i) = task_to_agent_and_index[task_i];
-    std::tie(agent_j, j) = task_to_agent_and_index[task_j];
-    assert(agent_i >= 0 && agent_j >= 0);
-    cout << "temporal dep " << agent_i << "(" << i << ") -> " << agent_j << "("
-         << j << ")" << endl;
-    temporal_cons[agent_i * num_of_agents + agent_j].push_back({i, j});
+  if (!buildGoalsAndTemporalConstraintsFromTaskPlan()) {
+    cerr << "Failed to build goal/temporal structures from greedy task plan"
+         << endl;
+    assert(false);
   }
 }

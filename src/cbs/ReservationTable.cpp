@@ -240,6 +240,67 @@ void ReservationTable::updateSIT(size_t location)
 			}
 		}
 
+				// soft constraints from ConstraintTable CAT (SIPP path-table style source)
+				if (cat_size > 0)
+				{
+					const int horizon = min(length_max, MAX_TIMESTEP - 1) + 1;
+					const int capped = min(cat_size, horizon);
+					if (location < map_size)
+					{
+						for (int t = 0; t < capped; t++)
+						{
+							const int count = getCATVertexConflictCount(location, t);
+							if (count <= 0)
+								continue;
+							if (soft_conflict_mode == SoftConflictMode::Count)
+							{
+								for (int k = 0; k < count; k++)
+									insertSoftConstraint2RT(location, t, t + 1);
+							}
+							else
+							{
+								insertSoftConstraint2RT(location, t, t + 1);
+							}
+						}
+						if (capped < horizon)
+						{
+							const int tail_count = getCATVertexConflictCount(location, capped);
+							if (tail_count > 0)
+							{
+								if (soft_conflict_mode == SoftConflictMode::Count)
+								{
+									for (int k = 0; k < tail_count; k++)
+										insertSoftConstraint2RT(location, capped, horizon);
+								}
+								else
+								{
+									insertSoftConstraint2RT(location, capped, horizon);
+								}
+							}
+						}
+					}
+					else
+					{
+						const size_t from = location / map_size - 1;
+						const size_t to = location % map_size;
+						for (int t = 1; t < capped; t++)
+						{
+							const int count = getCATEdgeConflictCount(from, to, t);
+							if (count <= 0)
+								continue;
+							if (soft_conflict_mode == SoftConflictMode::Count)
+							{
+								for (int k = 0; k < count; k++)
+									insertSoftConstraint2RT(location, t, t + 1);
+							}
+							else
+							{
+								insertSoftConstraint2RT(location, t, t + 1);
+							}
+						}
+					}
+				}
+
 		// soft constraints
 		const auto& it2 = cat.find(location);
 		if (it2 != cat.end())
@@ -315,7 +376,39 @@ list<Interval> ReservationTable::get_safe_intervals(size_t from, size_t to, size
 		auto t_min = max(std::get<0>(*it1), std::get<0>(*it2));
 		auto t_max = min(std::get<1>(*it1), std::get<1>(*it2));
 		if (t_min < t_max)
-			rst.emplace_back(t_min, t_max, std::get<2>(*it1) + std::get<2>(*it2));
+		{
+			// Align with MAPF-LNS2 SIPPS behavior:
+			// 1) vertex soft conflicts dominate (edge soft conflicts are ignored here),
+			// 2) if vertex has no soft conflict, split into edge-conflicting prefix and
+			//    edge-clean suffix.
+			const bool vertex_collision = std::get<2>(*it1) > 0;
+			if (vertex_collision)
+			{
+				rst.emplace_back(t_min, t_max, 1);
+			}
+			else
+			{
+				size_t first_no_edge = t_min;
+				for (; first_no_edge < t_max; ++first_no_edge)
+				{
+					if (!hasCATEdgeConflict(from, to, (int)first_no_edge))
+						break;
+				}
+				if (first_no_edge == t_min)
+				{
+					rst.emplace_back(t_min, t_max, 0);
+				}
+				else if (first_no_edge >= t_max)
+				{
+					rst.emplace_back(t_min, t_max, 1);
+				}
+				else
+				{
+					rst.emplace_back(t_min, first_no_edge, 1);
+					rst.emplace_back(first_no_edge, t_max, 0);
+				}
+			}
+		}
 		if (t_max == std::get<1>(*it1))
 			++it1;
 		if (t_max == std::get<1>(*it2))

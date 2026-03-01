@@ -71,8 +71,8 @@ inline void PBS::updatePaths(CBSNode* curr)
 }
 
 
-PBS::PBS(const Instance& instance, int screen):
-CBS(instance, false, heuristics_type::ZERO, screen)
+PBS::PBS(const Instance& instance, bool sipp, int screen):
+CBS(instance, sipp, heuristics_type::ZERO, screen)
 {
   this->screen = screen;
   this->focal_w = 1;
@@ -80,12 +80,10 @@ CBS(instance, false, heuristics_type::ZERO, screen)
   // mdd_helper(initial_constraints, search_engines),
 	clock_t t = clock();
 
-	search_engines.resize(num_of_agents);
   idbase.resize(num_of_agents, 0);
 
 	for (int i = 0; i < num_of_agents; i++)
 	{
-    search_engines[i] = new MultiLabelSpaceTimeAStar(instance, i);
     for (int j = 0; j < search_engines[i]->goal_location.size(); j++){
       id2task.push_back({i, j});
     }
@@ -123,6 +121,18 @@ CBS(instance, false, heuristics_type::ZERO, screen)
 	{
 		instance.printAgents();
 	}
+}
+
+void PBS::setMutableTasksMask(const vector<bool>& mutable_tasks_mask) {
+  if ((int)mutable_tasks_mask.size() != num_of_tasks) {
+    cout << "setMutableTasksMask size mismatch: got "
+         << mutable_tasks_mask.size() << ", expected " << num_of_tasks << endl;
+    mutable_tasks_mask_.clear();
+    strict_task_mutability_ = false;
+    return;
+  }
+  mutable_tasks_mask_ = mutable_tasks_mask;
+  strict_task_mutability_ = true;
 }
 
 
@@ -255,6 +265,39 @@ void PBS::build_ct(ConstraintTable& ct, int task_id, vector<vector<int>> adj_lis
     }
   }
   cout << endl;
+
+  if (strict_task_mutability_) {
+    const bool low_level_is_sipp = (search_engines[agent]->getName() == "SIPP");
+    if (low_level_is_sipp) {
+      // SIPP variant: frozen (non-mutable) task paths are soft conflicts.
+      vector<Path*> frozen_paths((size_t)num_of_tasks, nullptr);
+      size_t soft_cat_horizon = (size_t)ct.latest_timestep + 1;
+      for (int i = 0; i < num_of_tasks; i++) {
+        if (i == task_id || canReplanTask(i) || paths[i] == nullptr ||
+            paths[i]->empty()) {
+          continue;
+        }
+        frozen_paths[(size_t)i] = paths[i];
+        soft_cat_horizon = max(soft_cat_horizon, paths[i]->size() + 1);
+      }
+      ct.buildCAT(task_id, frozen_paths, soft_cat_horizon);
+    } else {
+      // MLA* variant: preserve hard blocking semantics for frozen tasks.
+      for (int i = 0; i < num_of_tasks; i++) {
+        if (i == task_id || canReplanTask(i)) {
+          continue;
+        }
+        if (paths[i] == nullptr || paths[i]->empty()) {
+          continue;
+        }
+        int frozen_agent = -1, frozen_task = -1;
+        tie(frozen_agent, frozen_task) = id2task[i];
+        bool wait_at_goal =
+            frozen_task == search_engines[frozen_agent]->goal_location.size() - 1;
+        ct.addPath(*paths[i], wait_at_goal);
+      }
+    }
+  }
   // cout << "soft cons: ";
   // for (int i = 0; i < num_of_tasks; i++){
   //   if (high_prio_agents.find(i) == high_prio_agents.end() && paths[i] != nullptr && !paths[i]->empty()){
@@ -315,6 +358,30 @@ bool PBS::generateChild(CBSNode* node, CBSNode* parent){
 
   // remove paths that are affected;
   auto affected_tasks = reachable_set(std::get<1>(node->constraints.front()), adj_list);
+  for (auto task_id : affected_tasks)
+  {
+    int agent = -1, task = -1;
+    tie(agent, task) = id2task[task_id];
+    (void) task;
+    if (!canReplanTask(task_id))
+    {
+      if (screen >= 2)
+      {
+        cout << "Reject child: fixed task (" << agent << ", " << task
+             << ") would need replanning" << endl;
+      }
+      return false;
+    }
+    if (!canReplanAgent(agent))
+    {
+      if (screen >= 2)
+      {
+        cout << "Reject child: fixed agent " << agent
+             << " would need replanning" << endl;
+      }
+      return false;
+    }
+  }
   for (auto task:affected_tasks){
     node->paths.emplace_back(task, Path());
     paths[task] = &node->paths.back().second;
@@ -348,8 +415,9 @@ bool PBS::generateChild(CBSNode* node, CBSNode* parent){
   for (auto i : planning_order)
     {
       int agent, task;
-      ConstraintTable ct;
       tie(agent, task) = id2task[i];
+      ConstraintTable ct(search_engines[agent]->instance.num_of_cols,
+                         search_engines[agent]->instance.map_size);
       if (paths[i]->empty()){
         cout << "replanning " << i << endl;
         int start_time = 0;
@@ -496,70 +564,159 @@ bool PBS::generateRoot()
   // cout << endl;
 
 
-  // initialize paths_found_initially
-  paths_found_initially.resize(num_of_tasks, Path());
-
-  dummy_start -> is_solution = true;
-  for (auto i : planning_order)
+  if (paths_found_initially.empty())
+  {
+    if (strict_task_mutability_) {
+      cout << "Strict task mutability requires initial task paths" << endl;
+      return false;
+    }
+    // initialize paths_found_initially
+    paths_found_initially.resize(num_of_tasks, Path());
+    // Keep task pointers live while root paths are built incrementally.
+    for (int i = 0; i < num_of_tasks; i++)
     {
-      //CAT cat(dummy_start->makespan + 1);  // initialized to false
-      //updateReservationTable(cat, i, *dummy_start);
+      paths[i] = &paths_found_initially[i];
+    }
+
+    for (auto i : planning_order)
+    {
       int agent, task;
       tie(agent, task) = id2task[i];
       int start_time = 0;
-      if (task != 0){
+      if (task != 0)
+      {
         assert(!paths_found_initially[task2id({agent, task - 1})].empty());
         start_time = paths_found_initially[task2id({agent, task - 1})].end_time();
       }
 
-      cout << "plan for " << agent << "(" << task << ")"<< endl;
-      ConstraintTable ct;
+      cout << "plan for " << agent << "(" << task << ")" << endl;
+      ConstraintTable ct(search_engines[agent]->instance.num_of_cols,
+                         search_engines[agent]->instance.map_size);
       build_ct(ct, i, adj_list_r);
 
-      paths_found_initially[i] = search_engines[agent]->findPathSegment(ct, start_time, task, 0);
+      paths_found_initially[i] =
+          search_engines[agent]->findPathSegment(ct, start_time, task, 0);
       if (paths_found_initially[i].empty())
-        {
-          cout << "No path exists for agent " << agent << "(" << task << ")" << endl;
-          return false;
-        }
+      {
+        cout << "No path exists for agent " << agent << "(" << task << ")"
+             << endl;
+        return false;
+      }
+      // Expose this newly built segment to subsequent CT construction.
       paths[i] = &paths_found_initially[i];
-
-      auto high_prio_agents = reachable_set(i, adj_list_r);
-      high_prio_agents.erase(i);
-      for (auto j: high_prio_agents){
-        assert(! findOneConflict(i, j));
-      }
-
-      bool conflict_found = false;
-
-      for (auto j : planning_order){
-        if (i == j){
-          break;
-        }
-        if (high_prio_agents.find(j) == high_prio_agents.end()){
-          if (findOneConflict(i, j)){
-            cout << "Conflict between " << i <<" and " << j << endl;
-            shared_ptr<Conflict> conflict(new Conflict());
-            conflict->priorityConflict(i, j);
-            dummy_start->conflict = conflict;
-            dummy_start->is_solution = false;
-            conflict_found = true;
-          }
-        }
-      }
-
-      // dummy_start->makespan = max(dummy_start->makespan, paths_found_initially[i].size() - 1);
-      // dummy_start->g_val += (int) paths_found_initially[i].size() - 1;
       num_LL_expanded += search_engines[agent]->num_expanded;
       num_LL_generated += search_engines[agent]->num_generated;
-
-      if (conflict_found){
-        break;
-      }
     }
+  }
+  else
+  {
+    if ((int)paths_found_initially.size() != num_of_tasks)
+    {
+      cout << "Invalid initial task path count: got "
+           << paths_found_initially.size() << ", expected " << num_of_tasks
+           << endl;
+      return false;
+    }
+    // Mini-repair mode: keep fixed-agent seeds and replan mutable tasks at root.
+    for (int i = 0; i < num_of_tasks; i++)
+    {
+      paths[i] = &paths_found_initially[i];
+    }
+
+    for (auto i : planning_order)
+    {
+      int agent, task;
+      tie(agent, task) = id2task[i];
+      if (!canReplanTask(i))
+      {
+        if (paths_found_initially[i].empty())
+        {
+          cout << "Initial task path " << i << " is empty for fixed agent "
+               << agent << endl;
+          return false;
+        }
+        continue;
+      }
+
+      int start_time = 0;
+      if (task != 0)
+      {
+        const int prev_task_id = task2id({agent, task - 1});
+        if (paths[prev_task_id] == nullptr || paths[prev_task_id]->empty())
+        {
+          cout << "Missing predecessor task path for mutable agent " << agent
+               << "(" << task - 1 << ")" << endl;
+          return false;
+        }
+        start_time = paths[prev_task_id]->end_time();
+      }
+
+      ConstraintTable ct(search_engines[agent]->instance.num_of_cols,
+                         search_engines[agent]->instance.map_size);
+      build_ct(ct, i, adj_list_r);
+      paths_found_initially[i] =
+          search_engines[agent]->findPathSegment(ct, start_time, task, 0);
+      if (paths_found_initially[i].empty())
+      {
+        cout << "No path exists for mutable agent " << agent << "(" << task
+             << ")" << endl;
+        return false;
+      }
+      paths[i] = &paths_found_initially[i];
+      num_LL_expanded += search_engines[agent]->num_expanded;
+      num_LL_generated += search_engines[agent]->num_generated;
+    }
+  }
 
   for (int i = 0; i < num_of_tasks; i++){
     paths[i] = &paths_found_initially[i];
+  }
+
+  dummy_start->is_solution = true;
+  for (auto i : planning_order)
+  {
+    auto high_prio_agents = reachable_set(i, adj_list_r);
+    high_prio_agents.erase(i);
+    bool conflict_found = false;
+    for (auto j : high_prio_agents)
+    {
+      if (findOneConflict(i, j))
+      {
+        cout << "Priority conflict between " << i << " and " << j << endl;
+        shared_ptr<Conflict> conflict(new Conflict());
+        conflict->priorityConflict(i, j);
+        dummy_start->conflict = conflict;
+        dummy_start->is_solution = false;
+        conflict_found = true;
+        break;
+      }
+    }
+    if (conflict_found)
+    {
+      break;
+    }
+    for (auto j : planning_order)
+    {
+      if (i == j)
+      {
+        break;
+      }
+      if (high_prio_agents.find(j) == high_prio_agents.end() &&
+          findOneConflict(i, j))
+      {
+        cout << "Conflict between " << i << " and " << j << endl;
+        shared_ptr<Conflict> conflict(new Conflict());
+        conflict->priorityConflict(i, j);
+        dummy_start->conflict = conflict;
+        dummy_start->is_solution = false;
+        conflict_found = true;
+        break;
+      }
+    }
+    if (conflict_found)
+    {
+      break;
+    }
   }
 
   // generate dummy start and update data structures
@@ -667,10 +824,22 @@ bool PBS::solve(double time_limit, int cost_lowerbound, int cost_upperbound)
 		if (screen > 1)
 			cout << endl << "Pop " << *curr << endl;
 
-		//Expand the node
-		num_HL_expanded++;
-		curr->time_expanded = num_HL_expanded;
-    CBSNode* child[2] = { new CBSNode(), new CBSNode() };
+			//Expand the node
+			num_HL_expanded++;
+			curr->time_expanded = num_HL_expanded;
+	    if (curr->conflict == nullptr)
+	    {
+	      // Guard against null conflict pointers in DFS replay.
+	      // Accept only explicit solution nodes; otherwise skip this dead-end.
+	      if (curr->is_solution)
+	      {
+	        solution_found = true;
+	        goal_node = curr;
+	        break;
+	      }
+	      continue;
+	    }
+	    CBSNode* child[2] = { new CBSNode(), new CBSNode() };
 
     // curr->conflict = chooseConflict(*curr);
     
@@ -781,4 +950,3 @@ PBS::~PBS(){
 	releaseNodes();
 	mdd_helper.clear();
 }
-

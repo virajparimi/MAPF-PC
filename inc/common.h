@@ -36,8 +36,6 @@ using std::ofstream;
 using std::cerr;
 using std::string;
 
-// #define NDEBUG 
-
 #define MAX_TIMESTEP INT_MAX / 2
 #define MAX_COST INT_MAX / 2
 #define MAX_NODES INT_MAX / 2
@@ -100,4 +98,3 @@ bool isSamePath(const Path& p1, const Path& p2);
         return h1 ^ h2 ^ h3;
     }
 };*/
-

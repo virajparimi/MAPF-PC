@@ -129,6 +129,14 @@ void ConstraintTable::copy(const ConstraintTable& other)
 	// we do not copy cat
 }
 
+void ConstraintTable::copyCAT(const ConstraintTable& other)
+{
+	cat_size = other.cat_size;
+	cat_small = other.cat_small;
+	cat_small_edges = other.cat_small_edges;
+	cat_large = other.cat_large;
+}
+
 
 // build the constraint table for the given agent at the given node
 void ConstraintTable::build(const CBSNode& node, int agent, int num_of_stops)
@@ -266,40 +274,71 @@ void ConstraintTable::buildCAT(int agent, const vector<Path*>& paths, size_t _ca
 	cat_size = std::max(_cat_size, (size_t) latest_timestep);
 	if (map_size < map_size_threshold)
 	{
-		// cat_small.resize(cat_size * map_size, false);
-		cat_small.resize(cat_size, vector<bool>(map_size, false));
+		cat_small.assign(cat_size, vector<uint16_t>(map_size, 0));
+		cat_small_edges.assign(cat_size, unordered_map<size_t, uint16_t>());
 		for (size_t ag = 0; ag < paths.size(); ag++)
 		{
 			if (ag == agent || paths[ag] == nullptr || paths[ag]->size() == 0)
 				continue;
+			int prev = paths[ag]->front().location;
 			for (size_t timestep = 0; timestep < paths[ag]->size(); timestep++)
 			{
-				//cat_small[timestep * map_size + paths[ag]->at(timestep).location] = true;
-				cat_small[timestep][paths[ag]->at(timestep).location] = true;
+				const int loc = paths[ag]->at(timestep).location;
+				if (loc < 0 || loc >= map_size)
+				{
+					prev = loc;
+					continue;
+				}
+				if (cat_small[timestep][loc] < UINT16_MAX)
+					cat_small[timestep][loc]++;
+				if (timestep > 0 && prev >= 0 && prev < (int)map_size)
+				{
+					const size_t rev_edge = getEdgeIndex((size_t)loc, (size_t)prev);
+					auto& edge_count = cat_small_edges[timestep][rev_edge];
+					if (edge_count < UINT16_MAX)
+						edge_count++;
+				}
+				prev = loc;
 			}
 			int goal = paths[ag]->back().location;
+			if (goal < 0 || goal >= map_size)
+				continue;
 			for (size_t timestep = paths[ag]->size(); timestep < cat_size; timestep++)
-				// cat_small[timestep * map_size + goal] = true;
-				cat_small[timestep][goal] = true;
+			{
+				if (cat_small[timestep][goal] < UINT16_MAX)
+					cat_small[timestep][goal]++;
+			}
 		}
 	}
 	else
 	{
+		cat_small.clear();
+		cat_small_edges.clear();
 		cat_large.resize(cat_size);
 		for (size_t ag = 0; ag < paths.size(); ag++)
 		{
 			if (ag == agent || paths[ag] == nullptr || paths[ag]->size() == 0)
 				continue;
 			int prev = paths[ag]->front().location;
+			if (prev < 0 || prev >= map_size)
+				continue;
 			int curr;
 			for (size_t timestep = 1; timestep < paths[ag]->size(); timestep++)
 			{
 				curr = paths[ag]->at(timestep).location;
+				if (curr < 0 || curr >= map_size)
+				{
+					prev = curr;
+					continue;
+				}
 				cat_large[timestep].push_back(curr);
-				cat_large[timestep].push_back(getEdgeIndex(curr, prev));
+				if (prev >= 0 && prev < map_size)
+					cat_large[timestep].push_back(getEdgeIndex(curr, prev));
 				prev = curr;
 			}
 			int goal = paths[ag]->back().location;
+			if (goal < 0 || goal >= map_size)
+				continue;
 			for (size_t timestep = paths[ag]->size(); timestep < cat_size; timestep++)
 				cat_large[timestep].push_back(goal);
 		}
@@ -308,92 +347,135 @@ void ConstraintTable::buildCAT(int agent, const vector<Path*>& paths, size_t _ca
 
 int ConstraintTable::getNumOfConflictsForStep(size_t curr_id, size_t next_id, int next_timestep) const
 {
+	if (hasCATVertexConflict(next_id, next_timestep))
+		return 1;
+	if (hasCATEdgeConflict(curr_id, next_id, next_timestep))
+		return 1;
+	return 0;
+}
+
+int ConstraintTable::getCATVertexConflictCount(size_t loc, int timestep) const
+{
+	if (loc >= map_size || timestep < 0)
+		return 0;
 	if (map_size < map_size_threshold)
 	{
-		if (next_timestep >= (int) cat_small.size())
-		{
-			if (cat_small.back()[next_id])
-				return 1;
-			else
-				return 0;
-		}
-		if (cat_small[next_timestep][next_id] ||
-			(curr_id != next_id && cat_small[next_timestep - 1][next_id] && cat_small[next_timestep][curr_id]))
-			return 1;
-		else
+		if (cat_small.empty())
 			return 0;
+		if (timestep >= (int)cat_small.size())
+			return (int)cat_small.back()[loc];
+		return (int)cat_small[timestep][loc];
 	}
-	else
-	{
-		if (next_timestep >= (int) cat_large.size())
-		{
-			for (const auto& loc : cat_large.back())
-			{
-				if (loc == next_id)
-					return 1;
-			}
-			return 0;
-		}
-		for (const auto& loc : cat_large[next_timestep])
-		{
-			if (loc == next_id)
-			{
-				return 1;
-			}
-			if (loc == getEdgeIndex(curr_id, next_id))
-			{
-				return 1;
-			}
-		}
+	if (cat_large.empty())
 		return 0;
-		/*auto& it = cat.back().find(next_id);
-		if (it != cat.back().end())
-			return 1;
-		else
-			return 0;*/
-	}
-	/*int rst = 0;
-	auto& it = cat[next_timestep].find(next_id);
-	if (it != cat[next_timestep].end())
+	const int bucket = min(timestep, (int)cat_large.size() - 1);
+	int count = 0;
+	for (const auto& occupied : cat_large[bucket])
 	{
-		rst++;
+		if (occupied == loc)
+			count++;
 	}
-	if (curr_id != next_id)
-	{
-		it = cat[next_timestep].find(getEdgeIndex(curr_id, next_id));
-		if (it != cat[next_timestep].end())
-		{
-			rst++;
-		}
-	}
-	return rst;*/
+	return count;
+}
 
-
-	/*if (next_timestep >= (int)cat.size())
+int ConstraintTable::getCATEdgeConflictCount(size_t curr_id, size_t next_id, int next_timestep) const
+{
+	if (curr_id == next_id || curr_id >= map_size || next_id >= map_size || next_timestep <= 0)
+		return 0;
+	const size_t rev_edge = getEdgeIndex(curr_id, next_id);
+	if (map_size < map_size_threshold)
 	{
-		auto& it = cat.back().find(next_id);
-		if (it != cat.back().end())
-			return 1;
-		else
+		if (cat_small_edges.empty() || next_timestep >= (int)cat_small_edges.size())
 			return 0;
+		const auto& row = cat_small_edges[next_timestep];
+		const auto it = row.find(rev_edge);
+		return it == row.end() ? 0 : (int)it->second;
 	}
+	if (cat_large.empty() || next_timestep >= (int)cat_large.size())
+		return 0;
+	int count = 0;
+	for (const auto& occupied : cat_large[next_timestep])
+	{
+		if (occupied == rev_edge)
+			count++;
+	}
+	return count;
+}
+
+int ConstraintTable::getFutureNumOfCollisions(size_t loc, int timestep) const
+{
+	if (loc >= map_size || cat_size <= 0)
+		return 0;
+
+	// If we are already beyond CAT horizon, report whether the implicit CAT tail
+	// still marks this location as occupied.
+	if (timestep >= cat_size - 1)
+		return getCATVertexConflictCount(loc, timestep + 1);
+
 	int rst = 0;
-	auto& it = cat[next_timestep].find(next_id);
-	if (it != cat[next_timestep].end())
+	const int start = max(0, timestep + 1);
+	if (map_size < map_size_threshold)
 	{
-		rst++;
-	}
-	if (curr_id != next_id)
+		if (cat_small.empty())
+			return 0;
+		const int end = (int)cat_small.size();
+			for (int t = start; t < end; t++)
+				rst += (int)cat_small[t][loc];
+			return rst;
+		}
+
+	if (cat_large.empty())
+		return 0;
+	const int end = (int)cat_large.size();
+	for (int t = start; t < end; t++)
 	{
-		it = cat[next_timestep].find(getEdgeIndex(curr_id, next_id));
-		if (it != cat[next_timestep].end())
+		for (const auto& occupied : cat_large[t])
 		{
-			rst++;
+			if (occupied == loc)
+				rst++;
 		}
 	}
 	return rst;
+}
 
-	*/
+int ConstraintTable::getLastCollisionTimestep(size_t loc) const
+{
+	if (loc >= map_size || cat_size <= 0)
+		return -1;
+
+	if (map_size < map_size_threshold)
+	{
+		if (cat_small.empty())
+			return -1;
+		for (int t = (int)cat_small.size() - 1; t >= 0; t--)
+		{
+			if (cat_small[t][loc])
+				return t;
+		}
+		return -1;
+	}
+
+	if (cat_large.empty())
+		return -1;
+	for (int t = (int)cat_large.size() - 1; t >= 0; t--)
+	{
+		for (const auto& occupied : cat_large[t])
+		{
+			if (occupied == loc)
+				return t;
+		}
+	}
+	return -1;
+}
+
+bool ConstraintTable::hasCATVertexConflict(size_t loc, int timestep) const
+{
+	return getCATVertexConflictCount(loc, timestep) > 0;
+}
+
+bool ConstraintTable::hasCATEdgeConflict(size_t curr_id, size_t next_id, int next_timestep) const
+{
+	return getCATEdgeConflictCount(curr_id, next_id, next_timestep) > 0;
 }
 
 
