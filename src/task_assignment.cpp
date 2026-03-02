@@ -5,6 +5,9 @@
 #include <boost/tokenizer.hpp>
 #include <algorithm>
 #include <cctype>
+#include <cstdint>
+#include <cstring>
+#include <cstdlib>
 #include <sstream>
 #include <unordered_set>
 #include "PBS.h"
@@ -335,6 +338,37 @@ static bool normalizeLowLevelPlanner(std::string planner_name,
   return false;
 }
 
+static bool normalizeCatBackend(std::string backend_name,
+                                std::string& normalized_backend) {
+  for (char& ch : backend_name) {
+    ch = (char)std::tolower((unsigned char)ch);
+  }
+  if (backend_name == "legacy") {
+    normalized_backend = "legacy";
+    return true;
+  }
+  if (backend_name == "pathtablewc" || backend_name == "path_table_wc") {
+    normalized_backend = "pathtablewc";
+    return true;
+  }
+  return false;
+}
+
+static bool parseBoolToken(std::string token, bool& value) {
+  for (char& ch : token) {
+    ch = (char)std::tolower((unsigned char)ch);
+  }
+  if (token == "1" || token == "true" || token == "yes" || token == "on") {
+    value = true;
+    return true;
+  }
+  if (token == "0" || token == "false" || token == "no" || token == "off") {
+    value = false;
+    return true;
+  }
+  return false;
+}
+
 /* Main function */
 int main(int argc, char** argv) {
   namespace po = boost::program_options;
@@ -365,8 +399,15 @@ int main(int argc, char** argv) {
           "solver, CBS, PBS or PBSN")(
           "lowLevelPlanner", po::value<string>()->default_value("mlastar"),
           "low-level planner: mlastar or sipps")(
-          "sippsSuboptimality", po::value<double>()->default_value(1.0),
-          "SIPPS low-level suboptimality bound (>=1.0)")
+      "sippsSuboptimality", po::value<double>()->default_value(1.0),
+          "SIPPS low-level suboptimality bound (>=1.0)")(
+          "catBackend", po::value<string>()->default_value(""),
+          "CAT backend: legacy or pathtablewc (default: env "
+          "MAPFPC_CAT_BACKEND or pathtablewc)")(
+          "catBackendSmallMaps", po::value<int>()->default_value(-1),
+          "Apply PathTableWC backend on small maps too when enabled: "
+          "1=on, 0=off, -1=env/default (env MAPFPC_CAT_BACKEND_SMALL_MAPS, "
+          "default on)")
       // params for instance generators
       ("rows", po::value<int>()->default_value(0), "number of rows")(
           "pc", po::value<bool>()->default_value(false),
@@ -412,6 +453,66 @@ int main(int argc, char** argv) {
   const bool useSippLowLevel = (lowLevelPlanner == "sipps");
   const double sippsSuboptimality =
       std::max(1.0, vm["sippsSuboptimality"].as<double>());
+  std::string catBackendRaw = vm["catBackend"].as<string>();
+  if (catBackendRaw.empty()) {
+    const char* envBackend = std::getenv("MAPFPC_CAT_BACKEND");
+    if (envBackend != nullptr) {
+      catBackendRaw = envBackend;
+    } else {
+      catBackendRaw = "pathtablewc";
+    }
+  }
+  std::string catBackend;
+  if (!normalizeCatBackend(catBackendRaw, catBackend) ||
+      !ConstraintTable::setGlobalCATBackendByName(catBackend)) {
+    std::cerr << "Unknown catBackend: '" << catBackendRaw
+              << "'. Expected 'legacy' or 'pathtablewc'.\n";
+    return -1;
+  }
+  bool catBackendSmallMaps = true;
+  const int catBackendSmallMapsOpt = vm["catBackendSmallMaps"].as<int>();
+  if (catBackendSmallMapsOpt == 0 || catBackendSmallMapsOpt == 1) {
+    catBackendSmallMaps = (catBackendSmallMapsOpt == 1);
+  } else if (catBackendSmallMapsOpt == -1) {
+    const char* envSmallMaps = std::getenv("MAPFPC_CAT_BACKEND_SMALL_MAPS");
+    if (envSmallMaps != nullptr && std::strlen(envSmallMaps) > 0) {
+      if (!parseBoolToken(envSmallMaps, catBackendSmallMaps)) {
+        std::cerr << "Invalid MAPFPC_CAT_BACKEND_SMALL_MAPS='"
+                  << envSmallMaps
+                  << "'. Expected one of {0,1,true,false,yes,no,on,off}.\n";
+        return -1;
+      }
+    }
+  } else {
+    std::cerr << "catBackendSmallMaps must be 0, 1, or -1 (env/default)\n";
+    return -1;
+  }
+  ConstraintTable::setGlobalCATBackendApplyOnSmallMaps(catBackendSmallMaps);
+  std::cout << "CAT_BACKEND=" << catBackend << std::endl;
+  std::cout << "CAT_BACKEND_SMALL_MAPS=" << (catBackendSmallMaps ? 1 : 0)
+            << std::endl;
+  ConstraintTable::resetCATQueryStats();
+  auto emitCatQueryStats = [&]() {
+    const auto stats = ConstraintTable::getCATQueryStats();
+    auto to_ms = [](uint64_t ns) -> double {
+      return static_cast<double>(ns) / 1e6;
+    };
+    std::cout << "CAT_QUERY_STATS"
+              << ",backend="
+              << ConstraintTable::catBackendName(
+                     ConstraintTable::getGlobalCATBackend())
+              << ",build_calls=" << stats.build_cat_calls
+              << ",build_ms=" << to_ms(stats.build_cat_total_ns)
+              << ",vertex_calls=" << stats.vertex_calls
+              << ",vertex_ms=" << to_ms(stats.vertex_total_ns)
+              << ",edge_calls=" << stats.edge_calls
+              << ",edge_ms=" << to_ms(stats.edge_total_ns)
+              << ",future_calls=" << stats.future_calls
+              << ",future_ms=" << to_ms(stats.future_total_ns)
+              << ",last_collision_calls=" << stats.last_collision_calls
+              << ",last_collision_ms=" << to_ms(stats.last_collision_total_ns)
+              << std::endl;
+  };
   int seed = vm["seed"].as<int>();
   if (seed == 0) {
     seed = (int)time(0);
@@ -553,6 +654,7 @@ int main(int argc, char** argv) {
     min_f_val = (int)cbs.min_f_val;
     if (!solved) {
       std::cerr << "CBS failed to find a valid solution" << std::endl;
+      emitCatQueryStats();
       return -1;
     }
     cbs.randomRoot = true;
@@ -581,6 +683,7 @@ int main(int argc, char** argv) {
       cout << endl;
     }
     cout << "Agent " << num_agents << endl;
+    emitCatQueryStats();
     cbs.clearSearchEngines();
 
   } else if (vm["solver"].as<string>() == "PBS") {
@@ -609,6 +712,7 @@ int main(int argc, char** argv) {
                                   initial_task_paths, split_error)) {
         std::cerr << "Failed to split initial joined paths for PBS: "
                   << split_error << std::endl;
+        emitCatQueryStats();
         return -1;
       }
       pbs.setInitialTaskPaths(initial_task_paths);
@@ -618,6 +722,7 @@ int main(int argc, char** argv) {
     min_f_val = (int)pbs.min_f_val;
     if (!solved) {
       std::cerr << "PBS failed to find a valid solution" << std::endl;
+      emitCatQueryStats();
       return -1;
     }
     pbs.randomRoot = true;
@@ -645,6 +750,7 @@ int main(int argc, char** argv) {
       cout << endl;
     }
     cout << "Agent " << num_agents << endl;
+    emitCatQueryStats();
     pbs.clearSearchEngines();
   } else if (vm["solver"].as<string>() == "PBSN") {
     PBS_naive pbs(instance, useSippLowLevel, vm["screen"].as<int>());
@@ -659,15 +765,18 @@ int main(int argc, char** argv) {
     min_f_val = (int)pbs.min_f_val;
     if (!solved) {
       std::cerr << "PBSN failed to find a valid solution" << std::endl;
+      emitCatQueryStats();
       return -1;
     }
     pbs.randomRoot = true;
     pbs.runtime = runtime;
     if (vm.count("output"))
       pbs.saveResults(vm["output"].as<string>(), vm["agents"].as<string>());
+    emitCatQueryStats();
     pbs.clearSearchEngines();
   } else {
     cout << "Unknown solver: " << vm["solver"].as<string>() << endl;
+    emitCatQueryStats();
     return -1;
   }
 

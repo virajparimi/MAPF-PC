@@ -1,4 +1,80 @@
 #include "ConstraintTable.h"
+#include <algorithm>
+#include <cctype>
+#include <chrono>
+
+namespace {
+using CATClock = std::chrono::steady_clock;
+
+inline uint64_t elapsedNs(const CATClock::time_point& start) {
+	return (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(
+	           CATClock::now() - start)
+	    .count();
+}
+} // namespace
+
+ConstraintTable::CATBackend ConstraintTable::global_cat_backend_ =
+    ConstraintTable::CATBackend::PathTableWC;
+bool ConstraintTable::global_cat_backend_apply_on_small_maps_ = false;
+ConstraintTable::CATQueryStats ConstraintTable::cat_query_stats_;
+
+bool ConstraintTable::setGlobalCATBackendByName(const string& backend_name) {
+	string normalized = backend_name;
+	std::transform(normalized.begin(), normalized.end(), normalized.begin(),
+	               [](unsigned char ch) { return (char)std::tolower(ch); });
+	if (normalized == "legacy") {
+		global_cat_backend_ = CATBackend::Legacy;
+		return true;
+	}
+	if (normalized == "pathtablewc" || normalized == "path_table_wc") {
+		global_cat_backend_ = CATBackend::PathTableWC;
+		return true;
+	}
+	return false;
+}
+
+const char* ConstraintTable::catBackendName(CATBackend backend) {
+	switch (backend) {
+	case CATBackend::Legacy:
+		return "legacy";
+	case CATBackend::PathTableWC:
+		return "pathtablewc";
+	default:
+		return "legacy";
+	}
+}
+
+void ConstraintTable::resetCATQueryStats() { cat_query_stats_ = CATQueryStats(); }
+
+ConstraintTable::CATQueryStats ConstraintTable::getCATQueryStats() {
+	return cat_query_stats_;
+}
+
+void ConstraintTable::recordCATQueryMetric(CATQueryMetric metric,
+                                           uint64_t elapsed_ns) {
+	switch (metric) {
+	case CATQueryMetric::BuildCAT:
+		cat_query_stats_.build_cat_calls++;
+		cat_query_stats_.build_cat_total_ns += elapsed_ns;
+		break;
+	case CATQueryMetric::Vertex:
+		cat_query_stats_.vertex_calls++;
+		cat_query_stats_.vertex_total_ns += elapsed_ns;
+		break;
+	case CATQueryMetric::Edge:
+		cat_query_stats_.edge_calls++;
+		cat_query_stats_.edge_total_ns += elapsed_ns;
+		break;
+	case CATQueryMetric::Future:
+		cat_query_stats_.future_calls++;
+		cat_query_stats_.future_total_ns += elapsed_ns;
+		break;
+	case CATQueryMetric::LastCollision:
+		cat_query_stats_.last_collision_calls++;
+		cat_query_stats_.last_collision_total_ns += elapsed_ns;
+		break;
+	}
+}
 
 void ConstraintTable::addPath(const Path & path, bool wait_at_goal){
   int offset = path.begin_time;
@@ -126,6 +202,13 @@ void ConstraintTable::copy(const ConstraintTable& other)
 	map_size = other.map_size;
 	ct = other.ct;
 	landmarks = other.landmarks;
+	cat_backend_ = other.cat_backend_;
+	cat_using_path_table_wc_ = false;
+	cat_size = 0;
+	cat_small.clear();
+	cat_small_edges.clear();
+	cat_large.clear();
+	cat_path_table_wc_.clear();
 	// we do not copy cat
 }
 
@@ -135,6 +218,9 @@ void ConstraintTable::copyCAT(const ConstraintTable& other)
 	cat_small = other.cat_small;
 	cat_small_edges = other.cat_small_edges;
 	cat_large = other.cat_large;
+	cat_path_table_wc_ = other.cat_path_table_wc_;
+	cat_backend_ = other.cat_backend_;
+	cat_using_path_table_wc_ = other.cat_using_path_table_wc_;
 }
 
 
@@ -269,13 +355,42 @@ void ConstraintTable::build(const CBSNode& node, int agent, int num_of_stops)
 // build the conflict avoidance table
 void ConstraintTable::buildCAT(int agent, const vector<Path*>& paths, size_t _cat_size)
 {
+	const auto query_start = CATClock::now();
+	auto finalize_metric = [&]() {
+		recordCATQueryMetric(CATQueryMetric::BuildCAT, elapsedNs(query_start));
+	};
+
 	if (length_min >= MAX_TIMESTEP || length_min > length_max) // the agent cannot reach its goal location
+	{
+		cat_size = 0;
+		cat_using_path_table_wc_ = false;
+		cat_small.clear();
+		cat_small_edges.clear();
+		cat_large.clear();
+		cat_path_table_wc_.clear();
+		finalize_metric();
 		return; // don't have to build CAT
+	}
 	cat_size = std::max(_cat_size, (size_t) latest_timestep);
+	cat_backend_ = global_cat_backend_;
+	cat_path_table_wc_.clear();
+	cat_using_path_table_wc_ = (cat_backend_ == CATBackend::PathTableWC) &&
+	                           (map_size >= map_size_threshold ||
+	                            global_cat_backend_apply_on_small_maps_);
+	if (cat_using_path_table_wc_)
+	{
+		cat_small.clear();
+		cat_small_edges.clear();
+		cat_large.clear();
+		cat_path_table_wc_.build(agent, paths, cat_size, map_size);
+		finalize_metric();
+		return;
+	}
 	if (map_size < map_size_threshold)
 	{
 		cat_small.assign(cat_size, vector<uint16_t>(map_size, 0));
 		cat_small_edges.assign(cat_size, unordered_map<size_t, uint16_t>());
+		cat_large.clear();
 		for (size_t ag = 0; ag < paths.size(); ag++)
 		{
 			if (ag == agent || paths[ag] == nullptr || paths[ag]->size() == 0)
@@ -343,6 +458,7 @@ void ConstraintTable::buildCAT(int agent, const vector<Path*>& paths, size_t _ca
 				cat_large[timestep].push_back(goal);
 		}
 	}
+	finalize_metric();
 }
 
 int ConstraintTable::getNumOfConflictsForStep(size_t curr_id, size_t next_id, int next_timestep) const
@@ -356,18 +472,25 @@ int ConstraintTable::getNumOfConflictsForStep(size_t curr_id, size_t next_id, in
 
 int ConstraintTable::getCATVertexConflictCount(size_t loc, int timestep) const
 {
+	const auto query_start = CATClock::now();
+	auto done = [&](int value) {
+		recordCATQueryMetric(CATQueryMetric::Vertex, elapsedNs(query_start));
+		return value;
+	};
 	if (loc >= map_size || timestep < 0)
-		return 0;
+		return done(0);
+	if (cat_using_path_table_wc_)
+		return done(cat_path_table_wc_.getVertexConflictCount(loc, timestep));
 	if (map_size < map_size_threshold)
 	{
 		if (cat_small.empty())
-			return 0;
+			return done(0);
 		if (timestep >= (int)cat_small.size())
-			return (int)cat_small.back()[loc];
-		return (int)cat_small[timestep][loc];
+			return done((int)cat_small.back()[loc]);
+		return done((int)cat_small[timestep][loc]);
 	}
 	if (cat_large.empty())
-		return 0;
+		return done(0);
 	const int bucket = min(timestep, (int)cat_large.size() - 1);
 	int count = 0;
 	for (const auto& occupied : cat_large[bucket])
@@ -375,57 +498,72 @@ int ConstraintTable::getCATVertexConflictCount(size_t loc, int timestep) const
 		if (occupied == loc)
 			count++;
 	}
-	return count;
+	return done(count);
 }
 
 int ConstraintTable::getCATEdgeConflictCount(size_t curr_id, size_t next_id, int next_timestep) const
 {
+	const auto query_start = CATClock::now();
+	auto done = [&](int value) {
+		recordCATQueryMetric(CATQueryMetric::Edge, elapsedNs(query_start));
+		return value;
+	};
 	if (curr_id == next_id || curr_id >= map_size || next_id >= map_size || next_timestep <= 0)
-		return 0;
-	const size_t rev_edge = getEdgeIndex(curr_id, next_id);
+		return done(0);
+	if (cat_using_path_table_wc_)
+		return done(
+		    cat_path_table_wc_.getEdgeConflictCount(curr_id, next_id, next_timestep));
 	if (map_size < map_size_threshold)
 	{
+		const size_t rev_edge = getEdgeIndex(curr_id, next_id);
 		if (cat_small_edges.empty() || next_timestep >= (int)cat_small_edges.size())
-			return 0;
+			return done(0);
 		const auto& row = cat_small_edges[next_timestep];
 		const auto it = row.find(rev_edge);
-		return it == row.end() ? 0 : (int)it->second;
+		return done(it == row.end() ? 0 : (int)it->second);
 	}
+	const size_t rev_edge = getEdgeIndex(curr_id, next_id);
 	if (cat_large.empty() || next_timestep >= (int)cat_large.size())
-		return 0;
+		return done(0);
 	int count = 0;
 	for (const auto& occupied : cat_large[next_timestep])
 	{
 		if (occupied == rev_edge)
 			count++;
 	}
-	return count;
+	return done(count);
 }
 
 int ConstraintTable::getFutureNumOfCollisions(size_t loc, int timestep) const
 {
+	const auto query_start = CATClock::now();
+	auto done = [&](int value) {
+		recordCATQueryMetric(CATQueryMetric::Future, elapsedNs(query_start));
+		return value;
+	};
 	if (loc >= map_size || cat_size <= 0)
-		return 0;
+		return done(0);
 
 	// If we are already beyond CAT horizon, report whether the implicit CAT tail
 	// still marks this location as occupied.
 	if (timestep >= cat_size - 1)
-		return getCATVertexConflictCount(loc, timestep + 1);
+		return done(getCATVertexConflictCount(loc, timestep + 1));
 
 	int rst = 0;
 	const int start = max(0, timestep + 1);
+	if (cat_using_path_table_wc_)
+		return done(cat_path_table_wc_.getFutureNumOfCollisions(loc, timestep));
 	if (map_size < map_size_threshold)
 	{
 		if (cat_small.empty())
-			return 0;
+			return done(0);
 		const int end = (int)cat_small.size();
 			for (int t = start; t < end; t++)
 				rst += (int)cat_small[t][loc];
-			return rst;
+			return done(rst);
 		}
-
 	if (cat_large.empty())
-		return 0;
+		return done(0);
 	const int end = (int)cat_large.size();
 	for (int t = start; t < end; t++)
 	{
@@ -435,37 +573,43 @@ int ConstraintTable::getFutureNumOfCollisions(size_t loc, int timestep) const
 				rst++;
 		}
 	}
-	return rst;
+	return done(rst);
 }
 
 int ConstraintTable::getLastCollisionTimestep(size_t loc) const
 {
+	const auto query_start = CATClock::now();
+	auto done = [&](int value) {
+		recordCATQueryMetric(CATQueryMetric::LastCollision, elapsedNs(query_start));
+		return value;
+	};
 	if (loc >= map_size || cat_size <= 0)
-		return -1;
+		return done(-1);
+	if (cat_using_path_table_wc_)
+		return done(cat_path_table_wc_.getLastCollisionTimestep(loc));
 
 	if (map_size < map_size_threshold)
 	{
 		if (cat_small.empty())
-			return -1;
+			return done(-1);
 		for (int t = (int)cat_small.size() - 1; t >= 0; t--)
 		{
 			if (cat_small[t][loc])
-				return t;
+				return done(t);
 		}
-		return -1;
+		return done(-1);
 	}
-
 	if (cat_large.empty())
-		return -1;
+		return done(-1);
 	for (int t = (int)cat_large.size() - 1; t >= 0; t--)
 	{
 		for (const auto& occupied : cat_large[t])
 		{
 			if (occupied == loc)
-				return t;
+				return done(t);
 		}
 	}
-	return -1;
+	return done(-1);
 }
 
 bool ConstraintTable::hasCATVertexConflict(size_t loc, int timestep) const
