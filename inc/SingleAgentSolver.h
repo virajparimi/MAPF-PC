@@ -2,6 +2,7 @@
 
 #include "Instance.h"
 #include "ConstraintTable.h"
+#include <cstdlib>
 
 class LLNode // low-level node
 {

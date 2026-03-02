@@ -1,1 +1,13 @@
 build/
+build*/
+cmake-build-*/
+.cache/
+.vscode/
+.idea/
+.DS_Store
+*.log
+*.out
+*.err
+*.tmp
+*.pid
+*.stackdump

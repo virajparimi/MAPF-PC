@@ -3,6 +3,14 @@
 #include <cstdlib>
 
 namespace {
+bool envFlagEnabled(const char* name) {
+  if (name == nullptr) {
+    return false;
+  }
+  const char* value = std::getenv(name);
+  return value != nullptr && std::atoi(value) != 0;
+}
+
 bool hardPathSatisfiesConstraints(const Path& path,
                                   const ConstraintTable& constraint_table) {
   if (path.empty()) {
@@ -151,10 +159,8 @@ void MultiLabelSIPP::releaseNodes() {
 }
 
 bool MultiLabelSIPP::dominanceCheck(MultiLabelSIPPNode* new_node) {
-  if (const char* disable_dom = std::getenv("MAPFPC_SIPP_DISABLE_DOMINANCE")) {
-    if (atoi(disable_dom) != 0) {
-      return true;
-    }
+  if (envFlagEnabled("MAPFPC_SIPP_DISABLE_DOMINANCE")) {
+    return true;
   }
   auto bucket_it = allNodes_table_.find(new_node);
   if (bucket_it == allNodes_table_.end()) {
@@ -162,6 +168,45 @@ bool MultiLabelSIPP::dominanceCheck(MultiLabelSIPPNode* new_node) {
   }
 
   auto& bucket = bucket_it->second;
+  if (envFlagEnabled("MAPFPC_SIPP_USE_LNS2_DOMINANCE")) {
+    for (auto it = bucket.begin(); it != bucket.end(); ++it) {
+      auto* old_node = *it;
+      if (old_node->timestep <= new_node->timestep &&
+          old_node->num_of_conflicts <= new_node->num_of_conflicts) {
+        return false;
+      } else if (old_node->timestep >= new_node->timestep &&
+                 old_node->num_of_conflicts >= new_node->num_of_conflicts) {
+        if (old_node->in_openlist) {
+          eraseNodeFromLists(old_node);
+        }
+        stale_nodes_.push_back(old_node);
+        bucket.erase(it);
+        num_generated--;
+        if (bucket.empty()) {
+          allNodes_table_.erase(bucket_it);
+        }
+        return true;
+      } else if (old_node->timestep < new_node->high_expansion &&
+                 new_node->timestep < old_node->high_expansion) {
+        if (old_node->timestep <= new_node->timestep) {
+          if (old_node->num_of_conflicts > new_node->num_of_conflicts) {
+            old_node->high_expansion =
+                std::min(old_node->high_expansion, new_node->timestep);
+          }
+        } else {
+          if (old_node->num_of_conflicts <= new_node->num_of_conflicts) {
+            new_node->high_expansion =
+                std::min(new_node->high_expansion, old_node->timestep);
+          }
+        }
+      }
+    }
+    if (bucket.empty()) {
+      allNodes_table_.erase(bucket_it);
+    }
+    return true;
+  }
+
   for (auto it = bucket.begin(); it != bucket.end();) {
     auto* old_node = *it;
     // Dominance must preserve reachable future wait/move options. A node with
@@ -406,6 +451,23 @@ Path MultiLabelSIPP::findPath(const CBSNode& node,
   w_ = (low_level_suboptimality >= 1.0) ? low_level_suboptimality : 1.0;
   Path path;
   path.begin_time = 0;
+  const bool disable_stage_gates =
+      envFlagEnabled("MAPFPC_SIPP_DISABLE_STAGE_GATES");
+  const bool disable_fub = envFlagEnabled("MAPFPC_SIPP_DISABLE_FUB");
+  // Default behavior: disable goal-CAT lower-bound term unless explicitly
+  // overridden with MAPFPC_SIPP_DISABLE_GOAL_CAT_LB=0.
+  const bool disable_goal_cat_lb = []() {
+    if (const char* env = std::getenv("MAPFPC_SIPP_DISABLE_GOAL_CAT_LB")) {
+      return std::atoi(env) != 0;
+    }
+    return true;
+  }();
+  const bool disable_hard_path_check =
+      envFlagEnabled("MAPFPC_SIPP_DISABLE_HARD_PATH_CHECK");
+  const bool disable_wait_feasibility_check =
+      envFlagEnabled("MAPFPC_SIPP_DISABLE_WAIT_FEASIBILITY_CHECK");
+  const bool disable_future_goal_soft_conflicts = envFlagEnabled(
+      "MAPFPC_SIPP_DISABLE_FUTURE_GOAL_SOFT_CONFLICTS");
 
   const int num_stages = (int)goal_location.size();
   if (num_stages <= 0) {
@@ -489,6 +551,9 @@ Path MultiLabelSIPP::findPath(const CBSNode& node,
   runtime_build_CAT = (double)(clock() - t) / CLOCKS_PER_SEC;
 
   auto can_advance_stage = [&](unsigned int stage_idx, int arrival_time) -> bool {
+    if (disable_stage_gates) {
+      return true;
+    }
     if ((int)constraint_table.g_goal_time.size() > (int)stage_idx &&
         arrival_time <= constraint_table.g_goal_time[stage_idx]) {
       return false;  // GSTOP: must be strictly later than gate
@@ -554,10 +619,10 @@ Path MultiLabelSIPP::findPath(const CBSNode& node,
   const int last_target_collision_time =
       constraint_table.getLastCollisionTimestep(goal_location.back());
   min_f_val_ = max(holding_time, max(min_f_val_, lower_bound));
-  if (last_target_collision_time >= 0) {
+  if (!disable_goal_cat_lb && last_target_collision_time >= 0) {
     min_f_val_ = max(min_f_val_, last_target_collision_time + 1);
   }
-  if ((int)root->stage < (int)f_ub.size() &&
+  if (!disable_fub && (int)root->stage < (int)f_ub.size() &&
       root->g_val + root->h_val > f_ub[root->stage]) {
     delete root;
     releaseNodes();
@@ -578,7 +643,8 @@ Path MultiLabelSIPP::findPath(const CBSNode& node,
 
     if (curr->terminal_goal) {
       updatePath(curr, path, true);
-      if (hardPathSatisfiesConstraints(path, constraint_table)) {
+      if (disable_hard_path_check ||
+          hardPathSatisfiesConstraints(path, constraint_table)) {
         break;
       }
       path.path.clear();
@@ -588,12 +654,27 @@ Path MultiLabelSIPP::findPath(const CBSNode& node,
     if (curr->location == goal_location.back() &&
         curr->stage == goal_location.size() - 1 &&
         curr->timestep >= holding_time) {
+      // Optional MLA*-style behavior: accept terminal goal as soon as hard
+      // holding-time condition is met, without internalizing future CAT soft
+      // conflicts at the goal cell.
+      if (disable_future_goal_soft_conflicts) {
+        updatePath(curr, path, true);
+        if (disable_hard_path_check ||
+            hardPathSatisfiesConstraints(path, constraint_table)) {
+          break;
+        }
+        path.path.clear();
+        path.timestamps.clear();
+        continue;
+      }
+
       const int future_collisions =
           constraint_table.getFutureNumOfCollisions(curr->location,
                                                     curr->timestep);
       if (future_collisions == 0) {
         updatePath(curr, path, true);
-        if (hardPathSatisfiesConstraints(path, constraint_table)) {
+        if (disable_hard_path_check ||
+            hardPathSatisfiesConstraints(path, constraint_table)) {
           break;
         }
         path.path.clear();
@@ -642,6 +723,7 @@ Path MultiLabelSIPP::findPath(const CBSNode& node,
             return;
           }
           if (candidate_timestep > curr->timestep + 1 &&
+              !disable_wait_feasibility_check &&
               !canWaitAtLocationUntil(constraint_table, curr->location,
                                       curr->timestep, candidate_timestep - 1)) {
             return;
@@ -668,7 +750,7 @@ Path MultiLabelSIPP::findPath(const CBSNode& node,
           if (next_g_val + next_h_val > constraint_table.length_max) {
             return;
           }
-          if ((int)next_stage < (int)f_ub.size() &&
+          if (!disable_fub && (int)next_stage < (int)f_ub.size() &&
               next_g_val + next_h_val > f_ub[next_stage]) {
             return;
           }
@@ -700,7 +782,7 @@ Path MultiLabelSIPP::findPath(const CBSNode& node,
         // Precedence window support: also consider delayed arrival at the
         // current-stage goal right after GSTOP, when that delay is still within
         // the same safe interval.
-        if (curr->stage < goal_location.size() - 1 &&
+        if (!disable_stage_gates && curr->stage < goal_location.size() - 1 &&
             next_location == goal_location[curr->stage] &&
             curr->stage < constraint_table.g_goal_time.size()) {
           const int gate_open_time =
@@ -716,14 +798,15 @@ Path MultiLabelSIPP::findPath(const CBSNode& node,
     // If the current stage is blocked only by GSTOP at this location, allow a
     // direct in-interval wait to gate_open_time.
     bool generated_gate_wait = false;
-    if (curr->stage < goal_location.size() - 1 &&
+    if (!disable_stage_gates && curr->stage < goal_location.size() - 1 &&
         curr->location == goal_location[curr->stage] &&
         curr->stage < constraint_table.g_goal_time.size()) {
       const int gate_open_time = constraint_table.g_goal_time[curr->stage] + 1;
       if (gate_open_time > curr->timestep &&
           gate_open_time <= curr->high_expansion &&
           gate_open_time <= constraint_table.length_max) {
-        if (!canWaitAtLocationUntil(constraint_table, curr->location,
+        if (!disable_wait_feasibility_check &&
+            !canWaitAtLocationUntil(constraint_table, curr->location,
                                     curr->timestep, gate_open_time - 1)) {
           continue;
         }
@@ -741,7 +824,7 @@ Path MultiLabelSIPP::findPath(const CBSNode& node,
 
         const int next_h_val = get_heuristic(next_stage, curr->location);
         if (next_g_val + next_h_val <= constraint_table.length_max) {
-          if ((int)next_stage < (int)f_ub.size() &&
+          if (!disable_fub && (int)next_stage < (int)f_ub.size() &&
               next_g_val + next_h_val > f_ub[next_stage]) {
             continue;
           }
@@ -772,6 +855,7 @@ Path MultiLabelSIPP::findPath(const CBSNode& node,
         (int)std::get<0>(wait_interval) <= constraint_table.length_max) {
       const int next_timestep = (int)std::get<0>(wait_interval);
       if (next_timestep > curr->timestep + 1 &&
+          !disable_wait_feasibility_check &&
           !canWaitAtLocationUntil(constraint_table, curr->location,
                                   curr->timestep, next_timestep - 1)) {
         continue;
@@ -792,7 +876,7 @@ Path MultiLabelSIPP::findPath(const CBSNode& node,
 
       const int next_h_val = get_heuristic(next_stage, curr->location);
       if (next_g_val + next_h_val <= constraint_table.length_max) {
-        if ((int)next_stage < (int)f_ub.size() &&
+        if (!disable_fub && (int)next_stage < (int)f_ub.size() &&
             next_g_val + next_h_val > f_ub[next_stage]) {
           continue;
         }

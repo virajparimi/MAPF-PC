@@ -376,6 +376,11 @@ int main(int argc, char** argv) {
           "cols", po::value<int>()->default_value(0), "number of columns")(
           "obs", po::value<int>()->default_value(0), "number of obstacles")(
           "mutex", po::value<bool>()->default_value(false), "using mutex")(
+          "rectangle", po::value<bool>()->default_value(true),
+          "using rectangle reasoning")(
+          "corridor", po::value<bool>()->default_value(true),
+          "using corridor reasoning")(
+          "bypass", po::value<bool>()->default_value(true), "using bypass")(
           "stp", po::value<bool>()->default_value(false), "using stp")(
           "target", po::value<bool>()->default_value(false),
           "using target reasoning")("timestamps",
@@ -521,10 +526,15 @@ int main(int argc, char** argv) {
     CBS cbs(instance, useSippLowLevel, h, vm["screen"].as<int>());
 
     cbs.setPrioritizeConflicts(vm["pc"].as<bool>());
+    cbs.setRectangleReasoning(vm["rectangle"].as<bool>());
+    cbs.setCorridorReasoning(vm["corridor"].as<bool>());
     cbs.setSTP(vm["stp"].as<bool>());
     cbs.setUsingTimestamps(vm["timestamps"].as<bool>());
     cbs.setTargetReasoning(vm["target"].as<bool>());
     cbs.setDisjointSplitting(vm["disjoint"].as<bool>());
+    cbs.setBypass(vm["bypass"].as<bool>());
+    cbs.setMutexReasoning(vm["mutex"].as<bool>() ? mutex_strategy::MUTEX_C
+                                                 : mutex_strategy::N_MUTEX);
     cbs.setLowLevelSuboptimality(sippsSuboptimality);
     //////////////////////////////////////////////////////////////////////
     // run

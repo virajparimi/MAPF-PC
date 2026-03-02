@@ -2,13 +2,37 @@
 
 #include "ReservationTable.h"
 #include "SingleAgentSolver.h"
+#include <cstdlib>
 
 class MultiLabelSIPPNode : public LLNode {
  public:
+  struct secondary_compare_node {
+    bool operator()(const MultiLabelSIPPNode* n1,
+                    const MultiLabelSIPPNode* n2) const {
+      bool use_lns2_order = true;
+      if (const char* env = std::getenv("MAPFPC_LL_FOCAL_USE_LNS2")) {
+        use_lns2_order = (std::atoi(env) != 0);
+      }
+      if (!use_lns2_order) {
+        return LLNode::secondary_compare_node()(n1, n2);
+      }
+      if (n1->num_of_conflicts == n2->num_of_conflicts) {
+        if (n1->g_val + n1->h_val == n2->g_val + n2->h_val) {
+          if (n1->h_val == n2->h_val) {
+            return rand() % 2 == 0;
+          }
+          return n1->h_val >= n2->h_val;
+        }
+        return n1->g_val + n1->h_val >= n2->g_val + n2->h_val;
+      }
+      return n1->num_of_conflicts >= n2->num_of_conflicts;
+    }
+  };
+
   typedef pairing_heap<MultiLabelSIPPNode*, compare<LLNode::compare_node>>::handle_type
       open_handle_t;
   typedef pairing_heap<MultiLabelSIPPNode*,
-                       compare<LLNode::secondary_compare_node>>::handle_type
+                       compare<MultiLabelSIPPNode::secondary_compare_node>>::handle_type
       focal_handle_t;
   open_handle_t open_handle;
   focal_handle_t focal_handle;
