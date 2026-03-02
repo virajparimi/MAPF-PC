@@ -266,36 +266,39 @@ void PBS::build_ct(ConstraintTable& ct, int task_id, vector<vector<int>> adj_lis
   }
   cout << endl;
 
-  if (strict_task_mutability_) {
-    const bool low_level_is_sipp = (search_engines[agent]->getName() == "SIPP");
-    if (low_level_is_sipp) {
-      // SIPP variant: frozen (non-mutable) task paths are soft conflicts.
-      vector<Path*> frozen_paths((size_t)num_of_tasks, nullptr);
-      size_t soft_cat_horizon = (size_t)ct.latest_timestep + 1;
-      for (int i = 0; i < num_of_tasks; i++) {
-        if (i == task_id || canReplanTask(i) || paths[i] == nullptr ||
-            paths[i]->empty()) {
-          continue;
-        }
-        frozen_paths[(size_t)i] = paths[i];
-        soft_cat_horizon = max(soft_cat_horizon, paths[i]->size() + 1);
+  const bool low_level_is_sipp = (search_engines[agent]->getName() == "SIPP");
+  if (low_level_is_sipp) {
+    // SIPP variant: always expose frozen (non-replanned) task paths as soft CAT,
+    // regardless of strict task mask vs agent-level mutability mode.
+    vector<Path*> frozen_paths((size_t)num_of_tasks, nullptr);
+    size_t soft_cat_horizon = (size_t)ct.latest_timestep + 1;
+    bool has_frozen_paths = false;
+    for (int i = 0; i < num_of_tasks; i++) {
+      if (i == task_id || canReplanTask(i) || paths[i] == nullptr ||
+          paths[i]->empty()) {
+        continue;
       }
+      frozen_paths[(size_t)i] = paths[i];
+      soft_cat_horizon = max(soft_cat_horizon, paths[i]->size() + 1);
+      has_frozen_paths = true;
+    }
+    if (has_frozen_paths) {
       ct.buildCAT(task_id, frozen_paths, soft_cat_horizon);
-    } else {
-      // MLA* variant: preserve hard blocking semantics for frozen tasks.
-      for (int i = 0; i < num_of_tasks; i++) {
-        if (i == task_id || canReplanTask(i)) {
-          continue;
-        }
-        if (paths[i] == nullptr || paths[i]->empty()) {
-          continue;
-        }
-        int frozen_agent = -1, frozen_task = -1;
-        tie(frozen_agent, frozen_task) = id2task[i];
-        bool wait_at_goal =
-            frozen_task == search_engines[frozen_agent]->goal_location.size() - 1;
-        ct.addPath(*paths[i], wait_at_goal);
+    }
+  } else if (strict_task_mutability_) {
+    // MLA* variant: preserve hard blocking semantics for frozen tasks.
+    for (int i = 0; i < num_of_tasks; i++) {
+      if (i == task_id || canReplanTask(i)) {
+        continue;
       }
+      if (paths[i] == nullptr || paths[i]->empty()) {
+        continue;
+      }
+      int frozen_agent = -1, frozen_task = -1;
+      tie(frozen_agent, frozen_task) = id2task[i];
+      bool wait_at_goal =
+          frozen_task == search_engines[frozen_agent]->goal_location.size() - 1;
+      ct.addPath(*paths[i], wait_at_goal);
     }
   }
   // cout << "soft cons: ";

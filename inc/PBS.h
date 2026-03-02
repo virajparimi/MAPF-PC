@@ -64,7 +64,13 @@ private:
 
   inline bool canReplanTask(int task_id) const {
     if (!strict_task_mutability_) {
-      return true;
+      if (task_id < 0 || task_id >= num_of_tasks ||
+          task_id >= (int)id2task.size()) {
+        return false;
+      }
+      int agent = -1, task = -1;
+      tie(agent, task) = id2task[task_id];
+      return canReplanAgent(agent);
     }
     return task_id >= 0 && task_id < num_of_tasks &&
            task_id < (int)mutable_tasks_mask_.size() &&

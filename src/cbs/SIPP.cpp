@@ -12,13 +12,20 @@ bool envFlagEnabled(const char* name) {
 }
 
 bool hardPathSatisfiesConstraints(const Path& path,
-                                  const ConstraintTable& constraint_table) {
+                                  const ConstraintTable& constraint_table,
+                                  bool relax_segment_start_boundary = false) {
   if (path.empty()) {
     return false;
   }
   const int offset = path.begin_time;
   for (int i = 0; i < (int)path.size(); i++) {
     const int t = offset + i;
+    // PBS segment mode aligns with MLA*: allow the segment start state at
+    // boundary handoff time even if predecessor terminal occupancy encoded a
+    // one-timestep hold at that exact (loc,t).
+    if (relax_segment_start_boundary && offset > 0 && i == 0) {
+      continue;
+    }
     if (constraint_table.constrained(path[i].location, t)) {
       return false;
     }
@@ -344,7 +351,8 @@ Path MultiLabelSIPP::findPathSegment(ConstraintTable& constraint_table,
       if (!path.empty()) {
         path.back().is_goal = true;
       }
-      if (hardPathSatisfiesConstraints(path, constraint_table)) {
+      if (hardPathSatisfiesConstraints(path, constraint_table,
+                                       /*relax_segment_start_boundary=*/true)) {
         break;
       }
       path.path.clear();

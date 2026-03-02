@@ -695,7 +695,8 @@ int main(int argc, char** argv) {
     int min_f_val = 0;
     pbs.clear();
     pbs.setMutableAgents(mutable_agents_mask);
-    if (!mutable_task_mask.empty()) {
+    const bool useStrictTaskMutability = !useSippLowLevel && !mutable_task_mask.empty();
+    if (useStrictTaskMutability) {
       pbs.setMutableTasksMask(mutable_task_mask);
     }
     if (!initial_joined_paths.empty()) {
@@ -707,8 +708,8 @@ int main(int argc, char** argv) {
       std::string split_error;
       if (!splitJoinedPathsForPBS(initial_joined_paths, goals_per_agent,
                                   mutable_agents_mask,
-                                  !mutable_task_mask.empty(),
-                                  mutable_task_mask.empty() ? nullptr : &mutable_task_mask,
+                                  useStrictTaskMutability,
+                                  useStrictTaskMutability ? &mutable_task_mask : nullptr,
                                   initial_task_paths, split_error)) {
         std::cerr << "Failed to split initial joined paths for PBS: "
                   << split_error << std::endl;
