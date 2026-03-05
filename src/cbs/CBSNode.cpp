@@ -1,5 +1,12 @@
 #include "CBSNode.h"
 
+bool CBSNode::open_list_uses_makespan_ = false;
+
+void CBSNode::setOpenListUsesMakespan(bool enabled) {
+  open_list_uses_makespan_ = enabled;
+}
+
+bool CBSNode::openListUsesMakespan() { return open_list_uses_makespan_; }
 
 void CBSNode::clear()
 {

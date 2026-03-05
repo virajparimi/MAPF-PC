@@ -28,6 +28,8 @@ int main(int argc, char** argv)
 		("cutoffTime,t", po::value<double>()->default_value(7200), "cutoff time (seconds)")
 		("screen,s", po::value<int>()->default_value(1), "screen option (0: none; 1: results; 2:all)")
 		("seed,d", po::value<int>()->default_value(0), "random seed")
+    ("optimizationObjective", po::value<string>()->default_value("soc"),
+     "Optimization objective: soc or makespan")
 		// params for instance generators
 		("rows", po::value<int>()->default_value(0), "number of rows")
 		("cols", po::value<int>()->default_value(0), "number of columns")
@@ -68,6 +70,15 @@ int main(int argc, char** argv)
 	}
 
 	po::notify(vm);
+  string optimizationObjective = vm["optimizationObjective"].as<string>();
+  for (char& ch : optimizationObjective) {
+    ch = (char)std::tolower((unsigned char)ch);
+  }
+  if (optimizationObjective != "soc" && optimizationObjective != "makespan") {
+    cerr << "Unknown optimizationObjective '" << vm["optimizationObjective"].as<string>()
+         << "'. Expected soc or makespan." << endl;
+    return -1;
+  }
   string lowLevelPlanner = vm["lowLevelPlanner"].as<string>();
   for (char& ch : lowLevelPlanner) {
     ch = (char)std::tolower((unsigned char)ch);
@@ -172,6 +183,7 @@ int main(int argc, char** argv)
     cbs.setLowLevelSuboptimality(sippsSuboptimality);
 		cbs.setConflictSelectionRule(conflict);
 	cbs.setNodeSelectionRule(n);
+  cbs.setOptimizationObjective(optimizationObjective);
 
   // Functions below are not supported right now
 	cbs.setPrioritizeConflicts(false);
