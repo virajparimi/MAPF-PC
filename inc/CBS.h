@@ -6,8 +6,6 @@
 #include "CorridorReasoning.h"
 #include "MutexReasoning.h"
 
-enum class optimization_objective { SOC, MAKESPAN };
-
 class CBS
 {
 public:
@@ -71,8 +69,6 @@ public:
       ptr->use_timestamps = b;
     }
   }
-  bool setOptimizationObjective(const string& objective_name);
-  string getOptimizationObjectiveName() const;
 
   ////////////////////////////////////////////////////////////////////////////////////////////
   // Runs the algorithm until the problem is solved or time is exhausted
@@ -184,8 +180,6 @@ protected:
   bool mutex_reasoning; // using mutex reasoning
   bool bypass; // using Bypass1
   bool PC; // prioritize conflicts
-  optimization_objective optimization_objective_ =
-      optimization_objective::SOC;
   conflict_selection conflict_selection_rule;
   node_selection node_selection_rule;
 
@@ -258,11 +252,6 @@ protected:
   void printConflicts(const CBSNode& curr) const;
 
   bool validateSolution() const;
-  int getNodePrimaryValue(const CBSNode& node) const;
-  double getNodeLowerBoundValue(const CBSNode& node) const;
-  int getNodeObjectiveValue(const CBSNode& node) const;
-  int getCurrentPathsMakespan() const;
-  int getCurrentObjectiveValue(int soc_value_hint) const;
   inline int getAgentLocation(int agent_id, size_t timestep) const;
   inline void pushNode(CBSNode* node);
 };

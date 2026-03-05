@@ -108,7 +108,7 @@ bool PBS_naive::solve(double time_limit, int cost_lowerbound, int cost_upperboun
 	generateRoot();
   if (dummy_start->conflicts.size() == 0){
     solution_found = true;
-    solution_cost = getCurrentObjectiveValue(dummy_start->g_val);
+    solution_cost = dummy_start->g_val;
     goal_node = dummy_start;
   }
 
@@ -168,14 +168,14 @@ bool PBS_naive::solve(double time_limit, int cost_lowerbound, int cost_upperboun
             delete child[i];
             continue;
           }
-					if (child[i]->conflicts.size() == 0) //no conflicts
-	          {// found a solution (and finish the while look)
-	            solution_found = true;
-	            goal_node = child[i];
-	            updatePaths(child[i]);
-	            solution_cost = getCurrentObjectiveValue(child[i]->g_val);
-	            break;
-	          }
+				if (child[i]->conflicts.size() == 0) //no conflicts
+          {// found a solution (and finish the while look)
+            solution_found = true;
+            solution_cost = child[i]->g_val;
+            goal_node = child[i];
+            updatePaths(child[i]);
+            break;
+          }
 			}
     // if (solved[0] && solved[1]){
     //   if (child[0]->g_val < child[1]->g_val){

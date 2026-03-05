@@ -8,20 +8,13 @@ enum node_selection { NODE_RANDOM, NODE_H, NODE_DEPTH, NODE_CONFLICTS, NODE_CONF
 class CBSNode
 {
 public:
-	static void setOpenListUsesMakespan(bool enabled);
-	static bool openListUsesMakespan();
-
 	// the following is used to compare nodes in the OPEN list
 	struct compare_node 
 	{
 		bool operator()(const CBSNode* n1, const CBSNode* n2) const 
 		{
 			// Strict weak ordering for pairing_heap (min f at top).
-			const int n1_primary =
-			    CBSNode::openListUsesMakespan() ? (int)n1->makespan : n1->g_val;
-			const int n2_primary =
-			    CBSNode::openListUsesMakespan() ? (int)n2->makespan : n2->g_val;
-			return n1_primary + n1->h_val > n2_primary + n2->h_val;
+			return n1->g_val + n1->h_val > n2->g_val + n2->h_val;
 		}
 	};  // used by OPEN to compare nodes by f_val (top of the heap has min f_val)
 
@@ -82,9 +75,6 @@ public:
 	void printConflictGraph(int num_of_agents) const;
 
   vector<vector<pair<int,int>>> agent_lb_ub;
-
-private:
-	static bool open_list_uses_makespan_;
 
 };
 
