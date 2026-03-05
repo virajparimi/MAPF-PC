@@ -354,6 +354,18 @@ static bool normalizeCatBackend(std::string backend_name,
   return false;
 }
 
+static bool normalizeOptimizationObjective(std::string objective_name,
+                                           std::string& normalized_objective) {
+  for (char& ch : objective_name) {
+    ch = (char)std::tolower((unsigned char)ch);
+  }
+  if (objective_name == "soc" || objective_name == "makespan") {
+    normalized_objective = objective_name;
+    return true;
+  }
+  return false;
+}
+
 static bool parseBoolToken(std::string token, bool& value) {
   for (char& ch : token) {
     ch = (char)std::tolower((unsigned char)ch);
@@ -397,35 +409,38 @@ int main(int argc, char** argv) {
           "screen option (0: none; 1: results; 2:all)")(
           "solver", po::value<string>()->default_value("CBS"),
           "solver, CBS, PBS or PBSN")(
+          "optimizationObjective",
+          po::value<string>()->default_value("soc"),
+          "Optimization objective: soc or makespan")(
           "lowLevelPlanner", po::value<string>()->default_value("mlastar"),
           "low-level planner: mlastar or sipps")(
       "sippsSuboptimality", po::value<double>()->default_value(1.0),
           "SIPPS low-level suboptimality bound (>=1.0)")(
           "catBackend", po::value<string>()->default_value(""),
           "CAT backend: legacy or pathtablewc (default: env "
-          "MAPFPC_CAT_BACKEND or pathtablewc)")(
+          "MAPFPC_CAT_BACKEND or legacy)")(
           "catBackendSmallMaps", po::value<int>()->default_value(-1),
           "Apply PathTableWC backend on small maps too when enabled: "
           "1=on, 0=off, -1=env/default (env MAPFPC_CAT_BACKEND_SMALL_MAPS, "
-          "default on)")
+          "default off)")
       // params for instance generators
       ("rows", po::value<int>()->default_value(0), "number of rows")(
           "pc", po::value<bool>()->default_value(false),
           "prioritize conflicts for CBS")(
-          "disjoint", po::value<bool>()->default_value(false),
+          "disjoint", po::value<bool>()->default_value(true),
           "using disjoint splitting")(
           "cols", po::value<int>()->default_value(0), "number of columns")(
           "obs", po::value<int>()->default_value(0), "number of obstacles")(
           "mutex", po::value<bool>()->default_value(false), "using mutex")(
-          "rectangle", po::value<bool>()->default_value(true),
+          "rectangle", po::value<bool>()->default_value(false),
           "using rectangle reasoning")(
-          "corridor", po::value<bool>()->default_value(true),
+          "corridor", po::value<bool>()->default_value(false),
           "using corridor reasoning")(
-          "bypass", po::value<bool>()->default_value(true), "using bypass")(
-          "stp", po::value<bool>()->default_value(false), "using stp")(
-          "target", po::value<bool>()->default_value(false),
+          "bypass", po::value<bool>()->default_value(false), "using bypass")(
+          "stp", po::value<bool>()->default_value(true), "using stp")(
+          "target", po::value<bool>()->default_value(true),
           "using target reasoning")("timestamps",
-                                    po::value<bool>()->default_value(false),
+                                    po::value<bool>()->default_value(true),
                                     "using timestamps for tie-breaking")(
           "warehouseWidth", po::value<int>()->default_value(0),
           "width of working stations on both sides, for generating instances")
@@ -451,6 +466,14 @@ int main(int argc, char** argv) {
     return -1;
   }
   const bool useSippLowLevel = (lowLevelPlanner == "sipps");
+  std::string optimizationObjective;
+  if (!normalizeOptimizationObjective(
+          vm["optimizationObjective"].as<string>(), optimizationObjective)) {
+    std::cerr << "Unknown optimizationObjective: '"
+              << vm["optimizationObjective"].as<string>()
+              << "'. Expected 'soc' or 'makespan'.\n";
+    return -1;
+  }
   const double sippsSuboptimality =
       std::max(1.0, vm["sippsSuboptimality"].as<double>());
   std::string catBackendRaw = vm["catBackend"].as<string>();
@@ -459,7 +482,7 @@ int main(int argc, char** argv) {
     if (envBackend != nullptr) {
       catBackendRaw = envBackend;
     } else {
-      catBackendRaw = "pathtablewc";
+      catBackendRaw = "legacy";
     }
   }
   std::string catBackend;
@@ -469,7 +492,7 @@ int main(int argc, char** argv) {
               << "'. Expected 'legacy' or 'pathtablewc'.\n";
     return -1;
   }
-  bool catBackendSmallMaps = true;
+  bool catBackendSmallMaps = false;
   const int catBackendSmallMapsOpt = vm["catBackendSmallMaps"].as<int>();
   if (catBackendSmallMapsOpt == 0 || catBackendSmallMapsOpt == 1) {
     catBackendSmallMaps = (catBackendSmallMapsOpt == 1);
@@ -637,6 +660,7 @@ int main(int argc, char** argv) {
     cbs.setMutexReasoning(vm["mutex"].as<bool>() ? mutex_strategy::MUTEX_C
                                                  : mutex_strategy::N_MUTEX);
     cbs.setLowLevelSuboptimality(sippsSuboptimality);
+    cbs.setOptimizationObjective(optimizationObjective);
     //////////////////////////////////////////////////////////////////////
     // run
     double runtime = 0;
@@ -688,7 +712,11 @@ int main(int argc, char** argv) {
 
   } else if (vm["solver"].as<string>() == "PBS") {
     PBS pbs(instance, useSippLowLevel, vm["screen"].as<int>());
+    // PBS does not use CBS conflict-reasoning toggles (rectangle/corridor/
+    // bypass/target/disjoint/mutex/stp). Keep only timestamp tie-breaking.
+    pbs.setUsingTimestamps(vm["timestamps"].as<bool>());
     pbs.setLowLevelSuboptimality(sippsSuboptimality);
+    pbs.setOptimizationObjective(optimizationObjective);
     //////////////////////////////////////////////////////////////////////
     // run
     double runtime = 0;
@@ -755,7 +783,10 @@ int main(int argc, char** argv) {
     pbs.clearSearchEngines();
   } else if (vm["solver"].as<string>() == "PBSN") {
     PBS_naive pbs(instance, useSippLowLevel, vm["screen"].as<int>());
+    // PBS naive also only needs timestamp tie-breaking from this flag set.
+    pbs.setUsingTimestamps(vm["timestamps"].as<bool>());
     pbs.setLowLevelSuboptimality(sippsSuboptimality);
+    pbs.setOptimizationObjective(optimizationObjective);
     //////////////////////////////////////////////////////////////////////
     // run
     double runtime = 0;

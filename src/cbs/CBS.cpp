@@ -1,10 +1,69 @@
 #include <algorithm>    // std::shuffle
 #include <random>      // std::default_random_engine
 #include <chrono>       // std::chrono::system_clock
+#include <cctype>
 #include <cstdlib>
 #include "CBS.h"
 #include "SIPP.h"
 #include "SpaceTimeAStar.h"
+
+bool CBS::setOptimizationObjective(const string& objective_name) {
+  string normalized = objective_name;
+  for (char& ch : normalized) {
+    ch = (char)std::tolower((unsigned char)ch);
+  }
+  if (normalized == "soc") {
+    optimization_objective_ = optimization_objective::SOC;
+    CBSNode::setOpenListUsesMakespan(false);
+    return true;
+  }
+  if (normalized == "makespan") {
+    optimization_objective_ = optimization_objective::MAKESPAN;
+    CBSNode::setOpenListUsesMakespan(true);
+    return true;
+  }
+  return false;
+}
+
+string CBS::getOptimizationObjectiveName() const {
+  return optimization_objective_ == optimization_objective::MAKESPAN
+             ? "makespan"
+             : "soc";
+}
+
+int CBS::getNodePrimaryValue(const CBSNode& node) const {
+  if (optimization_objective_ == optimization_objective::MAKESPAN) {
+    return (int)node.makespan;
+  }
+  return node.g_val;
+}
+
+double CBS::getNodeLowerBoundValue(const CBSNode& node) const {
+  return (double)getNodePrimaryValue(node) + (double)node.h_val;
+}
+
+int CBS::getNodeObjectiveValue(const CBSNode& node) const {
+  return getNodePrimaryValue(node);
+}
+
+int CBS::getCurrentPathsMakespan() const {
+  int makespan = 0;
+  for (const Path* path : paths) {
+    if (path == nullptr || path->empty()) {
+      continue;
+    }
+    const int end_time = path->begin_time + (int)path->size() - 1;
+    makespan = max(makespan, end_time);
+  }
+  return makespan;
+}
+
+int CBS::getCurrentObjectiveValue(int soc_value_hint) const {
+  if (optimization_objective_ == optimization_objective::SOC) {
+    return soc_value_hint;
+  }
+  return getCurrentPathsMakespan();
+}
 
 
 // takes the paths_found_initially and UPDATE all (constrained) paths found for agents from curr to start
@@ -717,7 +776,7 @@ inline void CBS::pushNode(CBSNode* node)
   node->open_handle = open_list.push(node);
   num_HL_generated++;
   node->time_generated = num_HL_generated;
-  if (node->g_val + node->h_val <= focal_list_threshold)
+  if (getNodeLowerBoundValue(*node) <= focal_list_threshold)
     node->focal_handle = focal_list.push(node);
   allNodes_table.push_back(node);
 }
@@ -752,18 +811,19 @@ void CBS::printPaths() const
 void CBS::updateFocalList()
 {
   CBSNode* open_head = open_list.top();
-  if (open_head->g_val + open_head->h_val > min_f_val)
+  const double open_head_lb = getNodeLowerBoundValue(*open_head);
+  if (open_head_lb > min_f_val)
   {
     if (screen == 3)
     {
       cout << "  Note -- FOCAL UPDATE!! from |FOCAL|=" << focal_list.size() << " with |OPEN|=" << open_list.size() << " to |FOCAL|=";
     }
-    min_f_val = open_head->g_val + open_head->h_val;
+    min_f_val = open_head_lb;
     double new_focal_list_threshold = min_f_val * focal_w;
     for (CBSNode* n : open_list)
     {
-      if (n->g_val + n->h_val > focal_list_threshold &&
-        n->g_val + n->h_val <= new_focal_list_threshold)
+      const double lb = getNodeLowerBoundValue(*n);
+      if (lb > focal_list_threshold && lb <= new_focal_list_threshold)
         n->focal_handle = focal_list.push(n);
     }
     focal_list_threshold = new_focal_list_threshold;
@@ -895,6 +955,8 @@ string CBS::getSolverName() const
 
 bool CBS::solve(double time_limit, int cost_lowerbound, int cost_upperbound)
 {
+  CBSNode::setOpenListUsesMakespan(
+      optimization_objective_ == optimization_objective::MAKESPAN);
   this->min_f_val = cost_lowerbound;
   this->cost_upperbound = cost_upperbound;
   this->time_limit = time_limit;
@@ -938,7 +1000,7 @@ bool CBS::solve(double time_limit, int cost_lowerbound, int cost_upperbound)
     if (curr->unknownConf.size() + curr->conflicts.size() == 0) //no conflicts
     {// found a solution (and finish the while look)
       solution_found = true;
-      solution_cost = curr->g_val;
+      solution_cost = getNodeObjectiveValue(*curr);
       goal_node = curr;
       break;
     }
@@ -965,7 +1027,7 @@ bool CBS::solve(double time_limit, int cost_lowerbound, int cost_upperbound)
 
       // reinsert the node
       curr->open_handle = open_list.push(curr);
-      if (curr->g_val + curr->h_val <= focal_list_threshold)
+      if (getNodeLowerBoundValue(*curr) <= focal_list_threshold)
         curr->focal_handle = focal_list.push(curr);
       if (screen == 2)
       {
@@ -983,7 +1045,7 @@ bool CBS::solve(double time_limit, int cost_lowerbound, int cost_upperbound)
       if (curr->unknownConf.size() + curr->conflicts.size() == 0) //no conflicts
       {// found a solution (and finish the while look)
         solution_found = true;
-        solution_cost = curr->g_val;
+        solution_cost = getNodeObjectiveValue(*curr);
         goal_node = curr;
         break;
       }
@@ -1122,11 +1184,14 @@ bool CBS::solve(double time_limit, int cost_lowerbound, int cost_upperbound)
           delete child[i];
           continue;
         }
-        if (child[i]->g_val + child[i]->h_val == min_f_val && curr->unknownConf.size() + curr->conflicts.size() == 0) //no conflicts
+        if (getNodeLowerBoundValue(*child[i]) == min_f_val && curr->unknownConf.size() + curr->conflicts.size() == 0) //no conflicts
         {// found a solution (and finish the while look)
           break;
         }
-        else if (bypass && child[i]->g_val == curr->g_val && child[i]->tie_breaking < curr->tie_breaking) // Bypass1
+        else if (bypass &&
+                 getNodeObjectiveValue(*child[i]) ==
+                     getNodeObjectiveValue(*curr) &&
+                 child[i]->tie_breaking < curr->tie_breaking) // Bypass1
         {
           if (i == 1 && !solved[0])
             continue;
@@ -1427,7 +1492,7 @@ bool CBS::generateRoot()
   findConflicts(*dummy_start);
   // We didn't compute the node-selection tie-breaking value for the root node
   // since it does not need it.
-  min_f_val = max(min_f_val, (double) dummy_start->g_val);
+  min_f_val = max(min_f_val, getNodeLowerBoundValue(*dummy_start));
   focal_list_threshold = min_f_val * focal_w;
 
   if (screen >= 2) // print start and goals

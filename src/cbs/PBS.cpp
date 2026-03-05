@@ -791,11 +791,11 @@ bool PBS::solve(double time_limit, int cost_lowerbound, int cost_upperbound)
   }
 
 
-	generateRoot();
+  generateRoot();
   if (dummy_start->is_solution){
     solution_found = true;
     join_paths();
-    solution_cost = dummy_start->g_val;
+    solution_cost = getCurrentObjectiveValue(dummy_start->g_val);
     goal_node = dummy_start;
   }
 
@@ -870,10 +870,10 @@ bool PBS::solve(double time_limit, int cost_lowerbound, int cost_upperbound)
 				if (child[i]->is_solution) //no conflicts
           {// found a solution (and finish the while look)
             solution_found = true;
-            solution_cost = child[i]->g_val;
             goal_node = child[i];
             updatePaths(child[i]);
             join_paths();
+            solution_cost = getCurrentObjectiveValue(child[i]->g_val);
             break;
           }
 			}
