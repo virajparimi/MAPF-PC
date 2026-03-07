@@ -7,12 +7,20 @@
 class MultiLabelSIPPNode : public LLNode {
  public:
   struct secondary_compare_node {
+    static bool useLns2FocalOrder() {
+      // Cache once; comparator is invoked very frequently in heap operations.
+      static const bool kUseLns2Order = []() {
+        if (const char* env = std::getenv("MAPFPC_LL_FOCAL_USE_LNS2")) {
+          return std::atoi(env) != 0;
+        }
+        return true;
+      }();
+      return kUseLns2Order;
+    }
+
     bool operator()(const MultiLabelSIPPNode* n1,
                     const MultiLabelSIPPNode* n2) const {
-      bool use_lns2_order = true;
-      if (const char* env = std::getenv("MAPFPC_LL_FOCAL_USE_LNS2")) {
-        use_lns2_order = (std::atoi(env) != 0);
-      }
+      const bool use_lns2_order = useLns2FocalOrder();
       if (!use_lns2_order) {
         return LLNode::secondary_compare_node()(n1, n2);
       }
