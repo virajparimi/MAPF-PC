@@ -261,7 +261,7 @@ Path MultiLabelSIPP::findPathSegment(ConstraintTable& constraint_table,
                                      int lowerbound) {
   num_expanded = 0;
   num_generated = 0;
-  w_ = (low_level_suboptimality >= 1.0) ? low_level_suboptimality : 1.0;
+  w_ = 1.0;
   Path path;
   path.begin_time = start_time;
 
@@ -456,7 +456,7 @@ Path MultiLabelSIPP::findPath(const CBSNode& node,
                               int lower_bound) {
   num_expanded = 0;
   num_generated = 0;
-  w_ = (low_level_suboptimality >= 1.0) ? low_level_suboptimality : 1.0;
+  w_ = 1.0;
   Path path;
   path.begin_time = 0;
   const bool disable_stage_gates =

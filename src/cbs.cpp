@@ -55,8 +55,6 @@ int main(int argc, char** argv)
 			("restart", po::value<int>()->default_value(1), "number of restart times (at least 1)")
 			("lowLevelPlanner", po::value<string>()->default_value("mlastar"),
 			 "low-level planner: mlastar or sipps")
-      ("sippsSuboptimality", po::value<double>()->default_value(1.0),
-       "SIPPS low-level suboptimality bound (>=1.0)")
 			;
 
 	po::variables_map vm;
@@ -85,8 +83,6 @@ int main(int argc, char** argv)
   }
 	  const bool useSippLowLevel =
 	      (lowLevelPlanner == "sipp" || lowLevelPlanner == "sipps");
-  const double sippsSuboptimality =
-      std::max(1.0, vm["sippsSuboptimality"].as<double>());
   if (!useSippLowLevel && lowLevelPlanner != "mlastar") {
     cerr << "Unknown lowLevelPlanner '" << vm["lowLevelPlanner"].as<string>()
          << "'. Expected mlastar or sipps." << endl;
@@ -180,7 +176,6 @@ int main(int argc, char** argv)
 		cbs.setDisjointSplitting(vm["disjointSplitting"].as<bool>());
 		cbs.setBypass(vm["bypass"].as<bool>());
 		cbs.setTargetReasoning(vm["targetReasoning"].as<bool>());
-    cbs.setLowLevelSuboptimality(sippsSuboptimality);
 		cbs.setConflictSelectionRule(conflict);
 	cbs.setNodeSelectionRule(n);
   cbs.setOptimizationObjective(optimizationObjective);

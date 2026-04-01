@@ -171,14 +171,6 @@ public:
 	virtual int getTravelTime(int start, int end, const ConstraintTable& constraint_table, int upper_bound) = 0;
 	virtual string getName() const = 0;
 
-  void setLowLevelSuboptimality(double w) {
-    if (w < 1.0) {
-      low_level_suboptimality = 1.0;
-    } else {
-      low_level_suboptimality = w;
-    }
-  }
-
 	list<int> getNextLocations(int curr) const; // including itself and its neighbors
 	list<int> getNeighbors(int curr) const { return instance.getNeighbors(curr); }
 
@@ -196,7 +188,6 @@ public:
 	virtual ~SingleAgentSolver() {}
 
   bool use_timestamps = true;
-  double low_level_suboptimality = 1.0;
 
 
 protected:

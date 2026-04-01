@@ -59,13 +59,6 @@ public:
   void setNodeSelectionRule(node_selection n) { node_selection_rule = n; heuristic_helper->node_selection_rule = n; }
   void setNodeLimit(int n) { node_limit = n; }
   void setSTP(bool s) {stp_helper.set_flag(s); }
-  void setLowLevelSuboptimality(double w) {
-    for (auto* engine : search_engines) {
-      if (engine != nullptr) {
-        engine->setLowLevelSuboptimality(w);
-      }
-    }
-  }
   void setUsingTimestamps(bool b) {
     for (auto ptr: search_engines){
       ptr->use_timestamps = b;

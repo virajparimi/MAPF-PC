@@ -37,8 +37,6 @@ int main(int argc, char** argv)
 	    ("warehouseWidth", po::value<int>()->default_value(0), "width of working stations on both sides, for generating instances")
 	    ("lowLevelPlanner", po::value<string>()->default_value("mlastar"),
 	     "low-level planner: mlastar or sipps")
-      ("sippsSuboptimality", po::value<double>()->default_value(1.0),
-       "SIPPS low-level suboptimality bound (>=1.0)")
 			;
 
 	po::variables_map vm;
@@ -67,8 +65,6 @@ int main(int argc, char** argv)
   }
 	  const bool useSippLowLevel =
 	      (lowLevelPlanner == "sipp" || lowLevelPlanner == "sipps");
-  const double sippsSuboptimality =
-      std::max(1.0, vm["sippsSuboptimality"].as<double>());
   if (!useSippLowLevel && lowLevelPlanner != "mlastar") {
     cerr << "Unknown lowLevelPlanner '" << vm["lowLevelPlanner"].as<string>()
          << "'. Expected mlastar or sipps." << endl;
@@ -98,7 +94,6 @@ int main(int argc, char** argv)
 	//////////////////////////////////////////////////////////////////////
 	// initialize the solver
 		PBS pbs(instance, useSippLowLevel, vm["screen"].as<int>());
-    pbs.setLowLevelSuboptimality(sippsSuboptimality);
     pbs.setOptimizationObjective(optimizationObjective);
 	//////////////////////////////////////////////////////////////////////
 	// run

@@ -414,8 +414,6 @@ int main(int argc, char** argv) {
           "Optimization objective: soc or makespan")(
           "lowLevelPlanner", po::value<string>()->default_value("mlastar"),
           "low-level planner: mlastar or sipps")(
-      "sippsSuboptimality", po::value<double>()->default_value(1.0),
-          "SIPPS low-level suboptimality bound (>=1.0)")(
           "catBackend", po::value<string>()->default_value(""),
           "CAT backend: legacy or pathtablewc (default: env "
           "MAPFPC_CAT_BACKEND or legacy)")(
@@ -474,8 +472,6 @@ int main(int argc, char** argv) {
               << "'. Expected 'soc' or 'makespan'.\n";
     return -1;
   }
-  const double sippsSuboptimality =
-      std::max(1.0, vm["sippsSuboptimality"].as<double>());
   std::string catBackendRaw = vm["catBackend"].as<string>();
   if (catBackendRaw.empty()) {
     const char* envBackend = std::getenv("MAPFPC_CAT_BACKEND");
@@ -659,7 +655,6 @@ int main(int argc, char** argv) {
     cbs.setBypass(vm["bypass"].as<bool>());
     cbs.setMutexReasoning(vm["mutex"].as<bool>() ? mutex_strategy::MUTEX_C
                                                  : mutex_strategy::N_MUTEX);
-    cbs.setLowLevelSuboptimality(sippsSuboptimality);
     cbs.setOptimizationObjective(optimizationObjective);
     //////////////////////////////////////////////////////////////////////
     // run
@@ -715,7 +710,6 @@ int main(int argc, char** argv) {
     // PBS does not use CBS conflict-reasoning toggles (rectangle/corridor/
     // bypass/target/disjoint/mutex/stp). Keep only timestamp tie-breaking.
     pbs.setUsingTimestamps(vm["timestamps"].as<bool>());
-    pbs.setLowLevelSuboptimality(sippsSuboptimality);
     pbs.setOptimizationObjective(optimizationObjective);
     //////////////////////////////////////////////////////////////////////
     // run
@@ -785,7 +779,6 @@ int main(int argc, char** argv) {
     PBS_naive pbs(instance, useSippLowLevel, vm["screen"].as<int>());
     // PBS naive also only needs timestamp tie-breaking from this flag set.
     pbs.setUsingTimestamps(vm["timestamps"].as<bool>());
-    pbs.setLowLevelSuboptimality(sippsSuboptimality);
     pbs.setOptimizationObjective(optimizationObjective);
     //////////////////////////////////////////////////////////////////////
     // run
